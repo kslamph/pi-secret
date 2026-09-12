@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { inspect } from "node:util";
 import {
   Vault,
-  activeScopeKey,
   activeVault,
   dropSessionVault,
   setActiveScopeKey,
@@ -12,7 +11,6 @@ import {
 import {
   derivedForms,
   envVarName,
-  findEnvVarCollision,
   fingerprint,
   isValidName,
   parseRef,

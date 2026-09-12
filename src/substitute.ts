@@ -1,4 +1,4 @@
-import { REF_RE, envVarName, isValidName } from "./refs.ts";
+import { REF_RE } from "./refs.ts";
 
 export { envVarName } from "./refs.ts";
 
