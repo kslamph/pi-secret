@@ -3,12 +3,11 @@ import {
   Vault,
   activeScopeKey,
   dropSessionVault,
-  fingerprint,
   setActiveScopeKey,
   vaultForSession,
   __vaultRegistryForTests,
 } from "../src/vault.ts";
-import { derivedForms, isValidName, parseRef } from "../src/refs.ts";
+import { derivedForms, fingerprint, isValidName, parseRef } from "../src/refs.ts";
 
 const K = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";

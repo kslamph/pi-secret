@@ -1,8 +1,5 @@
 import { MAX_REF_BYTES, fingerprint, isValidName } from "./refs.ts";
 
-// Re-exported so callers of the vault module can use the value primitive directly.
-export { fingerprint } from "./refs.ts";
-
 export type SecretTier = "session" | "ambient";
 export type SecretSource = "prompt" | "paste";
 
