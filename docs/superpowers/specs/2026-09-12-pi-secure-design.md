@@ -342,9 +342,14 @@ a silent, confusing failure. Correct transform:
 heredoc body                         →  ${__PISEC_GH} (only in unquoted-delimiter heredocs)
 ```
 
-Env var names: `__PISEC_` + uppercased entry name, sanitized to `[A-Z0-9_]`, with a
-2-char suffix collision guard against user env. A ref whose name is not in the vault is
-never silently dropped — see §11.
+Env var names: `__PISEC_` + the uppercased entry name sanitized to `[A-Z0-9_]`
+(**untruncated** — `isValidName` already caps names at 64) + `_` + 16 hex of
+`sha256(name)`, so at most 89 characters and always a valid POSIX identifier. Secret
+names are public in the transcript and Task 6 derives them from model-steerable text,
+so the tag must resist a *targeted* second preimage: 32 bits was not enough (a
+40-char window plus an 8-hex tag made `"x"`×45+`"4a5"` and `"x"`×45+`"1y32"` collide,
+a ~2^16 walk). Both places a name enters the vault — `add()` and `rename()` — refuse a
+collision. A ref whose name is not in the vault is never silently dropped — see §11.
 
 If a ref sits in a position where expansion cannot happen (single-quoted heredoc with a
 quoted delimiter, inside `$(printf '%q')`, etc.), **block with a reason** rather than
