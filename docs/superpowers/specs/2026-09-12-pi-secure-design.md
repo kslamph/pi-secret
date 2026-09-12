@@ -379,7 +379,19 @@ executing a command that would send the literal placeholder.
    where §8.2 happens to mask them.
 6. A heap core dump can contain vault values; same as any in-process secret store.
 7. `/name` session names and entry labels are not scrubbed — you typed those.
-8. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
+8. **A secret value becomes *code* when interpolated into a string a second shell
+   parses.** Env delivery is safe within one shell: bash never re-expands the result of
+   parameter expansion, so `printf '<%s>' $VAR` only word-splits a value containing
+   `$(...)` (measured). It is **not** safe through a nested shell - `sh -c "echo $VAR"`,
+   `bash -c`, `eval`, `ssh host "..."`, `docker exec ... sh -c` take the expanded value
+   as *source*, and a value containing `$(...)` executes (measured: both the `sh -c` and
+   `eval` variants created a marker file). The model cannot see values, so it cannot
+   craft one; exposure needs a user-supplied secret containing shell metacharacters, or
+   a model talked into piping a ref through `sh -c`/`eval`. Mitigated by guideline, not
+   by detector: reliably parsing shell is what this project's lexer has repeatedly failed
+   at, and a fragile nested-shell detector would produce false blocks that read as
+   pi-secure being broken.
+9. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
    raw secrets to a logging endpoint.** This is the largest accepted hole in the design, and
    it is a deliberate trade for file round-trip fidelity (§8.2). Flip the knob if you care
    more about the logger than about editing such files.
