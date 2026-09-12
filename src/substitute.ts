@@ -1,6 +1,7 @@
 import { REF_RE, type SecretResolver } from "./refs.ts";
 
 export { envVarName, findRefs, type Ref, type SecretResolver } from "./refs.ts";
+export { expandBash, heredocRegions, type BashExpansion } from "./substitute/bash.ts";
 
 export function expandRefs(text: string, resolve: SecretResolver): { text: string; used: string[]; missing: string[] } {
   const used: string[] = [];
