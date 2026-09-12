@@ -109,6 +109,11 @@ describe("Vault", () => {
     expect(v.names()).toEqual([first]);
   });
 
+  it("returns a value-free projection from add()", () => {
+    // A toMatchObject failure on a value-bearing entry prints the secret to CI.
+    expect("value" in v.add("gh_pat", GH, "prompt")).toBe(false);
+  });
+
   it("clear() wipes values and reports how many", () => {
     v.add("a", GH, "prompt");
     v.add("b", K, "paste");
