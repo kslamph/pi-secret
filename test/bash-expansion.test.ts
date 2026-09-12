@@ -88,4 +88,54 @@ describe("expandBash — bash agrees", () => {
       for (const value of Object.values(out.env)) expect(out.command).not.toContain(value);
     }
   });
+
+  it("$'…' delivers the value at runtime — the splice escapes the ANSI-C quotes", async () => {
+    const out = expandBash("printf '<%s>' $'{{sec:gh_pat}}'", resolve);
+    expect(await bashRun(out)).toBe("<" + GH + ">");
+  });
+
+  it('$"…' + '" expands like double quotes at runtime', async () => {
+    const out = expandBash('printf \'<%s>\' $"{{sec:gh_pat}}"', resolve);
+    expect(await bashRun(out)).toBe("<" + GH + ">");
+  });
+});
+
+describe("expandBash — lexical contexts the first draft got wrong", () => {
+  it("ignores comment prose when pairing quotes", () => {
+    const out = expandBash("# don't\necho {{sec:gh_pat}} > /tmp/o  # it's", resolve);
+    expect(out.command).toContain(`"$${GH_ENV}"`); // quoted, not spliced out of a phantom span
+    expect(out.missing).toEqual([]);
+    // Strengthener: pins the ref as plain argv quoting. The phantom-span bug also
+    // contains this substring (inside a splice), so assert the full line.
+    expect(out.command).toBe(`# don't\necho "$${GH_ENV}" > /tmp/o  # it's`);
+  });
+
+  it("does not let a comment double-quote unquote the value", () => {
+    const out = expandBash('# note "a\necho {{sec:gh_pat}}\n# " done', resolve);
+    expect(out.command).toContain(`"$${GH_ENV}"`);
+    expect(out.command).not.toMatch(/echo \$\{?__PISEC/);
+  });
+
+  it("treats $'…' as its own span and still delivers the value", () => {
+    const out = expandBash("echo $'{{sec:gh_pat}}'", resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(GH_ENV);
+    // ANSI-C quotes do not expand parameters, so the value can only be delivered
+    // by the close-and-reopen splice — the same treatment as a single-quoted ref.
+    expect(out.command).toBe(`echo $''"$${GH_ENV}"''`);
+  });
+
+  it("reports refs inside an unterminated quote instead of guessing", () => {
+    const out = expandBash("echo 'x\nrun {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+  });
+
+  it("keeps a#b a word, not a comment", () => {
+    const out = expandBash("echo a#b{{sec:gh_pat}}", resolve);
+    expect(out.command).toContain("a#b");
+    expect(out.missing).toEqual([]);
+    // Strengthener: a naive any-#-starts-a-comment lexer also passes the two
+    // assertions above (the ref is simply never seen). Pin the expansion.
+    expect(out.command).toBe(`echo a#b"$${GH_ENV}"`);
+  });
 });

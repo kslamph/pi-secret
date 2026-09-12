@@ -7,45 +7,101 @@ export interface BashExpansion {
   missing: string[];
 }
 
-type State = "code" | "sq" | "dq";
+type State = "code" | "sq" | "dq" | "ansq" | "loc";
 
 interface Interval {
   start: number;
   end: number;
 }
 
-/** Single- and double-quoted spans. Escapes matter only inside double quotes. */
-function quoteIntervals(text: string): { sq: Interval[]; dq: Interval[] } {
+interface QuoteScan {
+  sq: Interval[];
+  dq: Interval[];
+  /** ANSI-C spans: $'…'. Bash does not expand parameters inside, so a ref there
+   *  can only be delivered by the close-and-reopen splice, like a sq ref. */
+  ansq: Interval[];
+  /** Locale spans: $"…". Expands like double quotes. */
+  loc: Interval[];
+  /** Non-null when the scan ends inside a quote; `index` is the opening quote
+   *  character. Anything at or after it sits in quoting we cannot see. */
+  unterminated: { state: State; index: number } | null;
+}
+
+const isWhitespace = (ch: string | undefined): boolean => ch === " " || ch === "\t" || ch === "\n";
+
+/**
+ * Quote spans and lexical context, bash-aware beyond plain quotes:
+ *  - `#` starts a comment when it starts a word — at the start of input or
+ *    preceded by whitespace (`a#b` stays one word) — and comment text pairs no
+ *    quotes. Without this, two prose apostrophes in comments pair into a phantom
+ *    sq span that swallows a ref and silently delivers a literal variable name;
+ *  - `$'…'` and `$"…"` are their own spans, closed by the next unescaped
+ *    delimiter, so a `"` inside $"…" opens nothing and a `'` inside $'…' closes
+ *    only that span.
+ */
+function quoteIntervals(text: string): QuoteScan {
   const sq: Interval[] = [];
   const dq: Interval[] = [];
+  const ansq: Interval[] = [];
+  const loc: Interval[] = [];
   let state: State = "code";
-  let open = -1;
+  let open = -1; // index of the opening quote character
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (state === "code") {
       if (ch === "'") {
         state = "sq";
-        open = i + 1;
+        open = i;
       } else if (ch === '"') {
         state = "dq";
-        open = i + 1;
+        open = i;
+      } else if (ch === "$" && i + 1 < text.length) {
+        const next = text[i + 1];
+        if (next === "'") {
+          state = "ansq";
+          open = i + 1;
+          i++;
+        } else if (next === '"') {
+          state = "loc";
+          open = i + 1;
+          i++;
+        } else if (next === "\\") {
+          i++; // \$ is an escaped dollar
+        }
       } else if (ch === "\\" && i + 1 < text.length) {
         i++;
+      } else if (ch === "#" && (i === 0 || isWhitespace(text[i - 1]))) {
+        // Comment to end of line; the newline itself stays in code state.
+        const nl = text.indexOf("\n", i);
+        if (nl === -1) break;
+        i = nl;
       }
     } else if (state === "sq") {
       if (ch === "'") {
-        sq.push({ start: open, end: i });
+        sq.push({ start: open + 1, end: i });
+        state = "code";
+      }
+    } else if (state === "ansq") {
+      if (ch === "\\") i++; // escapes are processed inside $'…'
+      else if (ch === "'") {
+        ansq.push({ start: open + 1, end: i });
+        state = "code";
+      }
+    } else if (state === "dq") {
+      if (ch === "\\") i++;
+      else if (ch === '"') {
+        dq.push({ start: open + 1, end: i });
         state = "code";
       }
     } else {
       if (ch === "\\") i++;
       else if (ch === '"') {
-        dq.push({ start: open, end: i });
+        loc.push({ start: open + 1, end: i });
         state = "code";
       }
     }
   }
-  return { sq, dq };
+  return { sq, dq, ansq, loc, unterminated: state === "code" ? null : { state, index: open } };
 }
 
 export interface HeredocRegion {
@@ -60,10 +116,12 @@ export interface HeredocRegion {
 const HEREDOC_RE = /<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3/g;
 
 export function heredocRegions(text: string): HeredocRegion[] {
-  const { sq, dq } = quoteIntervals(text);
+  const { sq, dq, ansq, loc } = quoteIntervals(text);
   const swallowed = (index: number): boolean =>
     sq.some((r) => index >= r.start && index < r.end) ||
-    dq.some((r) => index >= r.start && index < r.end);
+    dq.some((r) => index >= r.start && index < r.end) ||
+    ansq.some((r) => index >= r.start && index < r.end) ||
+    loc.some((r) => index >= r.start && index < r.end);
 
   const regions: HeredocRegion[] = [];
   // Just past the previously consumed terminator line; -1 = none consumed yet.
@@ -138,7 +196,7 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
   const inInertRegion = (index: number): boolean =>
     regions.some((r) => r.inert && index >= r.start && index < r.end);
 
-  const { sq, dq } = quoteIntervals(command);
+  const { sq, dq, ansq, loc, unterminated } = quoteIntervals(command);
   const edits: Array<{ start: number; end: number; text: string }> = [];
 
   for (const ref of findRefs(command)) {
@@ -150,35 +208,49 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
       if (!missing.includes(ref.name)) missing.push(ref.name);
       continue;
     }
+    // Fail closed: a quote left open means the lexer cannot know where it ends,
+    // so any later ref may sit inside quoting we cannot see (the review repro
+    // delivered a literal variable name through exactly such a phantom span).
+    // bash rejects the command as a syntax error anyway; reporting it here makes
+    // the failure ours, and ours is the message the model reads.
+    if (unterminated && ref.start >= unterminated.index) {
+      if (!missing.includes(ref.name)) missing.push(ref.name);
+      continue;
+    }
     const varName = bind(ref.name);
     if (varName === undefined) continue; // unknown name: leave the literal ref for the caller to report
 
     const inHeredoc = regions.some((r) => !r.inert && ref.start >= r.start && ref.end <= r.end);
     const inDq = dq.some((r) => ref.start >= r.start && ref.end <= r.end);
+    const inLoc = loc.some((r) => ref.start >= r.start && ref.end <= r.end);
     const inSq = sq.some((r) => ref.start >= r.start && ref.end <= r.end);
+    const inAnsq = ansq.some((r) => ref.start >= r.start && ref.end <= r.end);
 
-    if (inSq) {
-      // The ONLY edit is at the ref itself: close the single quote, splice in
-      // the double-quoted variable, reopen. Touching characters around the ref
-      // (an earlier draft deleted `ref.start - 1`, the space before it) drops
-      // the span's closing quote and yields an unterminated quote — a bash
-      // syntax error, not a silent literal.
+    if (inSq || inAnsq) {
+      // The ONLY edit is at the ref itself: close the quote, splice in the
+      // double-quoted variable, reopen. Touching characters around the ref (an
+      // earlier draft deleted `ref.start - 1`, the space before it) drops the
+      // span's closing quote and yields an unterminated quote — a bash syntax
+      // error, not a silent literal.
       //   'A {{sec:x}} B'  ->  'A '"$VAR"' B'
       //   '{{sec:x}} B'    ->  ''"$VAR"' B'       (leading empty quote is correct)
       //   'A {{sec:x}}'    ->  'A '"$VAR"''        (trailing empty quote likewise)
+      // $'…' needs the same splice: ANSI-C strings do not expand parameters, so
+      // an inline $VAR would deliver the literal variable name.
       edits.push({ start: ref.start, end: ref.end, text: `'"${'$'}${varName}"'` });
       continue;
     }
-    // Quote-protected references use the bare `$VAR` form; braces are added only
-    // where the name would otherwise be misread — in a heredoc body (no quotes
-    // protect it) and wherever a word character follows the ref (`{{sec:x}}suffix`
-    // would otherwise read the variable as `VARsuffix`).
+    // Quote-protected references use the bare `$VAR` form ($"…" expands like
+    // double quotes); braces are added only where the name would otherwise be
+    // misread — in a heredoc body (no quotes protect it) and wherever a word
+    // character follows the ref (`{{sec:x}}suffix` would otherwise read the
+    // variable as `VARsuffix`).
     edits.push({
       start: ref.start,
       end: ref.end,
       text: inHeredoc
         ? "${" + varName + "}"
-        : inDq
+        : inDq || inLoc
           ? /^[A-Za-z0-9_]$/.test(command[ref.end] ?? "")
             ? "${" + varName + "}"
             : `${'$'}${varName}`
