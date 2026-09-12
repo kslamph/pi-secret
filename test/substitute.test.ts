@@ -64,8 +64,8 @@ describe("expandRefs", () => {
 
 describe("envVarName", () => {
   it("maps a secret name to a distinct shell identifier", () => {
-    expect(envVarName("gh_pat")).toMatch(/^__PISEC_GH_PAT_[0-9a-f]{8}$/);
-    expect(envVarName("db_url-v2")).toMatch(/^__PISEC_DB_URL_V2_[0-9a-f]{8}$/);
+    expect(envVarName("gh_pat")).toMatch(/^__PISEC_GH_PAT_[0-9a-f]{16}$/);
+    expect(envVarName("db_url-v2")).toMatch(/^__PISEC_DB_URL_V2_[0-9a-f]{16}$/);
   });
 
   it("is deterministic", () => {
@@ -80,20 +80,16 @@ describe("envVarName", () => {
 
   it("differs for names that sanitize alike and for long shared prefixes", () => {
     expect(envVarName("a-b")).not.toBe(envVarName("a_b"));
-    // A 48-char sanitize window with a 16-bit tag let these collide; 8 hex of
-    // sha256 over the whole name, plus a 40-char window, closes the offline walk.
+    // No truncation plus a 64-bit tag: names differing anywhere in their first 64
+    // chars already differ here, and the 32-bit-tag birthday walk is closed.
     const long = "x".repeat(45);
     expect(envVarName(long + "_a")).not.toBe(envVarName(long + "_b"));
-  });
-
-  it("stays under 64 chars for a maximum-length name", () => {
-    expect(envVarName("a".repeat(64)).length).toBeLessThanOrEqual(64);
   });
 
   it("stays a valid identifier and within bounds for a maximum-length name", () => {
     const name = "a".repeat(64);
     expect(envVarName(name)).toMatch(/^[A-Za-z_][A-Za-z0-9_]*$/);
-    expect(envVarName(name).length).toBeLessThanOrEqual(57);
+    expect(envVarName(name).length).toBeLessThanOrEqual(89);
   });
 });
 

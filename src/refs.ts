@@ -27,16 +27,26 @@ export function derivedForms(value: string): string[] {
 }
 
 /**
- * The shell variable a secret is exported as. `name` is public, so this digest is
- * a collision suppressor, not a secret: 8 hex of sha256 over the *whole* name, so
- * two names that sanitize identically (a-b vs a_b) still differ, and an attacker
- * cannot walk a 16-bit tag offline to force a match.
+ * The shell variable a secret is exported as.
  *
- * Bound: 8 (prefix) + 40 (sanitized) + 1 + 8 = 57 chars, valid POSIX identifier.
+ * `name` is public - the transcript shows `sec:gh_pat` - so this digest is a
+ * collision suppressor, not a secret, and it must resist a *targeted* second
+ * preimage: Task 6 derives names from text an untrusted endpoint can steer, and an
+ * attacker who knows a victim's name and can land a second name in the vault wants
+ * both to resolve to one variable, delivering the wrong credential to a chosen host.
+ *
+ * Two properties, in order of importance:
+ *  - the sanitized body is NOT truncated, so names differing anywhere in their first
+ *    64 chars (isValidName caps at 64) already differ here;
+ *  - the tag is 64 bits of sha256 over the whole name. 32 bits was breakable: a
+ *    40-char window plus an 8-hex tag makes "x"x45+"4a5" and "x"x45+"1y32" collide,
+ *    which is a ~2^16 birthday walk. 64 bits makes the targeted search infeasible.
+ *
+ * Bound: 8 + up to 64 + 1 + 16 = 89 chars, always a valid POSIX identifier.
  */
 export function envVarName(name: string): string {
-  const sanitized = name.toUpperCase().replace(/[^A-Z0-9]/g, "_").slice(0, 40);
-  const tag = createHash("sha256").update(name, "utf8").digest("hex").slice(0, 8);
+  const sanitized = name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  const tag = createHash("sha256").update(name, "utf8").digest("hex").slice(0, 16);
   return `__PISEC_${sanitized}_${tag}`;
 }
 

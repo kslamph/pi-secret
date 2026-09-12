@@ -9,7 +9,7 @@ import {
   vaultForSession,
   __vaultRegistryForTests,
 } from "../src/vault.ts";
-import { derivedForms, fingerprint, isValidName, parseRef } from "../src/refs.ts";
+import { derivedForms, envVarName, fingerprint, isValidName, parseRef } from "../src/refs.ts";
 
 const K = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -99,15 +99,11 @@ describe("Vault", () => {
     expect(safe).not.toHaveProperty("value");
   });
 
-  it("refuses two names that would share one shell variable", () => {
-    // a-b and a_b differ by design (sha256 tag over the whole name), so this uses
-    // a birthday-found pair whose 40-char sanitized window AND 8-hex sha256 tag
-    // are equal: the exact collision the entry check exists to refuse.
-    const first = "x".repeat(45) + "4a5";
-    const second = "x".repeat(45) + "1y32";
-    v.add(first, GH, "prompt");
-    expect(() => v.add(second, K, "paste")).toThrow(/collides with/);
-    expect(v.names()).toEqual([first]);
+  it("gives punctuation-variant and long-prefix names distinct variables", () => {
+    expect(envVarName("a-b")).not.toBe(envVarName("a_b"));
+    const long = "x".repeat(45);
+    // This pair shared a variable under a 40-char window plus a 32-bit tag.
+    expect(envVarName(long + "4a5")).not.toBe(envVarName(long + "1y32"));
   });
 
   it("hides values from util.inspect, not just JSON.stringify", () => {
