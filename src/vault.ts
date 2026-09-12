@@ -146,9 +146,19 @@ export function activeScopeKey(): string | undefined {
   return currentScope;
 }
 
-/** The vault for whichever session is currently bound in this process. */
+/**
+ * The vault for whichever session is currently bound.
+ *
+ * Throws rather than falling back to a shared key: a fallback vault that is not the
+ * current session's key is never passed to dropSessionVault by any teardown path, so
+ * secrets captured while unscoped would survive every session end — the exact
+ * opposite of this module's purpose. session_start binds the scope before any tool,
+ * command or hook runs, so unscoped access is a programming error and is reported
+ * as one. (ruling I3)
+ */
 export function activeVault(): Vault {
-  return vaultForSession(currentScope ?? "ephemeral");
+  if (currentScope === undefined) throw new Error("pi-secure: no session scope bound (activeVault called before session_start)");
+  return vaultForSession(currentScope);
 }
 
 /** Wipe before deleting so a later registry dump cannot resurrect it. */

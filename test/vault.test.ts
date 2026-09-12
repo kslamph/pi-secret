@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   Vault,
   activeScopeKey,
+  activeVault,
   dropSessionVault,
   setActiveScopeKey,
   vaultForSession,
@@ -124,9 +125,16 @@ describe("session scoping", () => {
 
   it("keys vaults by session so reload reclaims the same one", () => {
     setActiveScopeKey("/tmp/a.jsonl");
-    vaultForSession(activeScopeKey()!).add("k", GH, "prompt");
+    activeVault().add("k", GH, "prompt");
     setActiveScopeKey("/tmp/a.jsonl");
-    expect(vaultForSession(activeScopeKey()!).resolve("k")).toBe(GH);
+    expect(activeVault().resolve("k")).toBe(GH);
+  });
+
+  it("refuses to hand out a vault when no scope is bound", () => {
+    setActiveScopeKey(undefined);
+    expect(() => activeVault()).toThrow(/no session scope bound/);
+    // The old "ephemeral" fallback was never dropped by any teardown path.
+    expect(__vaultRegistryForTests().has("ephemeral")).toBe(false);
   });
 
   it("drops only the targeted session", () => {
