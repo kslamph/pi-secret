@@ -9,7 +9,7 @@ import {
   vaultForSession,
   __vaultRegistryForTests,
 } from "../src/vault.ts";
-import { derivedForms, envVarName, fingerprint, isValidName, parseRef } from "../src/refs.ts";
+import { derivedForms, envVarName, findEnvVarCollision, fingerprint, isValidName, parseRef } from "../src/refs.ts";
 
 const K = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -104,6 +104,16 @@ describe("Vault", () => {
     const long = "x".repeat(45);
     // This pair shared a variable under a 40-char window plus a 32-bit tag.
     expect(envVarName(long + "4a5")).not.toBe(envVarName(long + "1y32"));
+  });
+
+  it("refuses a name whose shell variable is already taken", () => {
+    // Injected resolver: a genuine 64-bit collision is not findable in a test.
+    const flat = () => "__PISEC_FLAT_0000000000000000";
+    expect(findEnvVarCollision(["first"], "second", flat)).toBe("first");
+    expect(findEnvVarCollision(["first"], "second", envVarName)).toBeUndefined();
+    v.add("a-b", GH, "prompt");
+    expect(() => v.add("a_b", K, "paste")).not.toThrow();
+    expect(v.names()).toEqual(["a-b", "a_b"]);
   });
 
   it("hides values from util.inspect, not just JSON.stringify", () => {

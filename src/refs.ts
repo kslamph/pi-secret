@@ -50,6 +50,24 @@ export function envVarName(name: string): string {
   return `__PISEC_${sanitized}_${tag}`;
 }
 
+/**
+ * Which already-held name, if any, would claim the same shell variable as `name`.
+ * Extracted with an injectable resolver so the refusal path is testable: a genuine
+ * 64-bit collision cannot be found in a test, and asserting "no collision" on
+ * `a-b` vs `a_b` would not exercise the throw at all.
+ */
+export function findEnvVarCollision(
+  existing: Iterable<string>,
+  name: string,
+  toVar: (n: string) => string = envVarName,
+): string | undefined {
+  const candidate = toVar(name);
+  for (const other of existing) {
+    if (other !== name && toVar(other) === candidate) return other;
+  }
+  return undefined;
+}
+
 export function refToken(name: string): string {
   return `{{sec:${name}}}`;
 }
