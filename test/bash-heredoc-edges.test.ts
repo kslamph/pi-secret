@@ -34,6 +34,10 @@ describe("heredoc edge semantics (beyond the task-4 fixture contract; each case 
     const text = "cat <<-EOF\ntoken={{sec:x}}\n\tEOF\n";
     const rs = heredocRegions(text);
     expect(rs.length).toBe(1);
+    // Body-slice assertion: if tab-stripping were deleted, the terminator would
+    // never match, the unterminated fallback would swallow the `\tEOF` line, and
+    // every assertion below would still pass. Only the body slice distinguishes.
+    expect(text.slice(rs[0]!.start, rs[0]!.end)).toBe("token={{sec:x}}\n");
     const out = expandBash(text, resolve);
     expect(out.command).toBe(`cat <<-EOF\ntoken=\${${X}}\n\tEOF\n`);
   });

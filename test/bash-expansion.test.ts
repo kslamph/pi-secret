@@ -2,12 +2,16 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { expandBash, type BashExpansion } from "../src/substitute.ts";
-import { bashCases, DB_ENV, GH, GH_ENV, SPACED_ENV } from "./bash-quote-table.ts";
+import { bashCases, DB, DB_ENV, GH, GH_ENV, SPACED, SPACED_ENV } from "./bash-quote-table.ts";
+
+/** A value every shell metacharacter; delivered verbatim, it must never touch argv or shell syntax. */
+const HOSTILE = "tok_en;$(reboot)' | rm -rf *";
 
 const resolve = (name: string): string | undefined =>
   name === "gh_pat" ? "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
   : name === "db_url" ? "postgres://admin:s3cr3t@db.internal:5432/app"
   : name === "spaced" ? "a b 'c' $(echo pwned)"
+  : name === "hostile" ? HOSTILE
   : undefined;
 
 /** Which ref name each table env var was derived from, for the `used` assertion. */
@@ -33,10 +37,14 @@ describe("expandBash — shape", () => {
 });
 
 describe("expandBash — never emits the value", () => {
+  // Every resolved value the suite knows about, checked against every expansion:
+  // the three env-less cases (unknown ref, uppercase ref, no ref) otherwise
+  // generate no-op loops.
+  const ALL_VALUES = [GH, DB, SPACED, HOSTILE];
   for (const c of bashCases) {
-    it(`${c.it}: value absent from command text`, () => {
+    it(`${c.it}: no resolved value in the command text`, () => {
       const out = expandBash(c.input, resolve);
-      for (const value of Object.values(c.env)) expect(out.command).not.toContain(value);
+      for (const value of ALL_VALUES) expect(out.command).not.toContain(value);
     });
   }
 });
@@ -48,6 +56,11 @@ const run = promisify(execFile);
  * way the wrapped bash tool will deliver it: as spawned env, never as argv.
  */
 async function bashRun(expansion: BashExpansion): Promise<string> {
+  // The argv claim, carried by every runtime case: whatever bash is handed must
+  // reference the secret by name only.
+  for (const value of Object.values(expansion.env)) {
+    expect(expansion.command).not.toContain(value);
+  }
   const { stdout } = await run("/bin/bash", ["-c", expansion.command], {
     env: { ...process.env, ...expansion.env },
   });
@@ -97,6 +110,14 @@ describe("expandBash — bash agrees", () => {
   it('$"…' + '" expands like double quotes at runtime', async () => {
     const out = expandBash('printf \'<%s>\' $"{{sec:gh_pat}}"', resolve);
     expect(await bashRun(out)).toBe("<" + GH + ">");
+  });
+
+  it("a hostile value reaches the child verbatim, never through argv or the shell", async () => {
+    const out = expandBash(`printf '<%s>' '{{sec:hostile}}'`, resolve);
+    expect(out.missing).toEqual([]);
+    // bashRun asserts the command text carries no value; this asserts the child
+    // sees the hostile value as exactly one argument, unexecuted and unexpanded.
+    expect(await bashRun(out)).toBe(`<${HOSTILE}>`);
   });
 });
 
