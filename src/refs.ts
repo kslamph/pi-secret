@@ -25,3 +25,7 @@ export function derivedForms(value: string): string[] {
   const buf = Buffer.from(value, "utf8");
   return [value, buf.toString("base64"), buf.toString("base64url"), buf.toString("hex")];
 }
+
+export function refToken(name: string): string {
+  return `{{sec:${name}}}`;
+}
