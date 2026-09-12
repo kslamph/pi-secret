@@ -2,11 +2,14 @@
 
 pi-secure is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent that keeps credentials out of everything an LLM endpoint can see — request bodies, session files, transcripts, exports — while letting the model *use* those credentials in shell commands and tool calls without friction. You should never have to paste a token into a conversation, and if you do, it should not end up in the conversation.
 
+> **Status:** as of v0.0.1 this repository ships the package scaffold only (entry stub + tests); the behavior described below lands in Tasks 2–14.
+
 ## The `{{sec:NAME}}` contract
 
 The model learns exactly one rule:
 
 - Reference credentials as `{{sec:NAME}}` in bash commands and tool arguments. The value is substituted at execution time and is never visible to the model.
+- Names match `/^[a-z][a-z0-9_-]{0,63}$/`.
 - Use the `sec_list` tool to see available names. Never ask the user to paste a secret, token, password, or API key.
 - If a `sec:` reference is rejected, call `sec_list` and retry with a valid name.
 
@@ -16,15 +19,18 @@ Secrets live in memory for the current session only — never persisted, never r
 
 ## `/sec` commands
 
-| Command | Effect |
+One command, `/sec`, with eight subcommands:
+
+| Subcommand | Effect |
 |---|---|
 | `/sec add [name]` | Enter a value via a masked prompt (characters render as `•`); length + fingerprint shown on confirm. This session only. |
 | `/sec list` | List entries: name, length, fingerprint, provenance. Never values. |
+| `/sec remove NAME` | Remove an entry from the vault. |
 | `/sec rename OLD NEW` | Rename an entry. |
-| `/sec rm NAME` | Remove an entry. |
-| `/sec test NAME` | Reprint an entry's fingerprint — verify you captured the right value without echoing it. |
-| `/sec restore NAME` | Copy the value to the **clipboard and editor buffer** — never into chat, never into a tool result. There is no `sec_reveal` tool, and there never will be one. |
+| `/sec test NAME` | Reprint a secret's length + fingerprint so you can confirm a capture without echoing it. |
+| `/sec restore NAME` | Copy a captured value back to your clipboard — never into chat, never into a tool result. There is no `sec_reveal` tool. |
 | `/sec off` | Suspend pi-secure for this session. |
+| `/sec on` | Re-enable pi-secure after `/sec off`. |
 
 Pasting a credential into the conversation also works: high-confidence secrets are captured into the vault and rewritten to a ref before anything is persisted, with a receipt line left in the transcript (name, length, fingerprint — never the value).
 
