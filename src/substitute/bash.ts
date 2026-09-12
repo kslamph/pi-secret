@@ -27,7 +27,17 @@ interface QuoteScan {
   unterminated: { state: State; index: number } | null;
 }
 
-const isWhitespace = (ch: string | undefined): boolean => ch === " " || ch === "\t" || ch === "\n";
+/**
+ * Bash-measured comment-start boundary: start of input, whitespace, or one of
+ * the three statement/pipe separators. Deliberately narrower than bash's full
+ * metacharacter set — measured against /bin/bash: `x=#hello` is a literal value,
+ * `echo y=$(echo 1)#c` prints `1#c`, and `echo hi >#log` redirects to a file
+ * named `#log`. Widening past this set would treat a `#` inside a real value as
+ * a comment and swallow a ref that follows it.
+ */
+const startsComment = (prev: string | undefined): boolean =>
+  prev === undefined || prev === " " || prev === "\t" || prev === "\n" ||
+  prev === ";" || prev === "|" || prev === "&";
 
 /**
  * Quote spans and lexical context, bash-aware beyond plain quotes:
@@ -70,7 +80,7 @@ function quoteIntervals(text: string): QuoteScan {
         }
       } else if (ch === "\\" && i + 1 < text.length) {
         i++;
-      } else if (ch === "#" && (i === 0 || isWhitespace(text[i - 1]))) {
+      } else if (ch === "#" && (i === 0 || startsComment(text[i - 1]))) {
         // Comment to end of line; the newline itself stays in code state.
         const nl = text.indexOf("\n", i);
         if (nl === -1) break;

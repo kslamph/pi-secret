@@ -159,4 +159,17 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
     // assertions above (the ref is simply never seen). Pin the expansion.
     expect(out.command).toBe(`echo a#b"$${GH_ENV}"`);
   });
+
+  it("starts a comment after ; | and & even with no space", () => {
+    const out = expandBash("echo hi;#don't\necho {{sec:gh_pat}} is here;#it's", resolve);
+    expect(out.command).toContain(`"$${GH_ENV}"`); // quoted expansion, not a phantom-span splice
+    expect(out.command).not.toContain(`'"$`);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("does NOT treat =, ) or > as comment starts, per measured bash", () => {
+    expect(expandBash("x=#hello\necho {{sec:gh_pat}}", resolve).command).toContain("#hello");
+    expect(expandBash("echo y=$(echo 1)#c {{sec:gh_pat}}", resolve).missing).toEqual([]);
+    expect(expandBash("echo hi >#log {{sec:gh_pat}}", resolve).missing).toEqual([]);
+  });
 });
