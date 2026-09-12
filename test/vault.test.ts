@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { inspect } from "node:util";
 import {
   Vault,
   activeScopeKey,
@@ -107,6 +108,12 @@ describe("Vault", () => {
     v.add(first, GH, "prompt");
     expect(() => v.add(second, K, "paste")).toThrow(/collides with/);
     expect(v.names()).toEqual([first]);
+  });
+
+  it("hides values from util.inspect, not just JSON.stringify", () => {
+    v.add("gh_pat", GH, "prompt");
+    expect(inspect(v)).not.toContain(GH);
+    expect(inspect(v, { customInspect: false })).not.toContain(GH);
   });
 
   it("returns a value-free projection from add()", () => {
