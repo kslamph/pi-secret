@@ -192,8 +192,12 @@ capture the user cannot audit is one they'll stop trusting. The entry stores onl
 name/length/fingerprint.
 
 **Restore is the escape hatch that makes silent capture safe.** `/sec restore NAME`
-copies the value to the **clipboard and editor buffer** — never into chat, never into a
-tool result. There is **no `sec_reveal` tool**, and the tool registry must never gain
+copies the value to the **clipboard** — never into chat, never into a tool result, and
+deliberately never into the editor buffer. That last exclusion is a correction made
+during implementation review: `ctx.ui.setEditorText()` places text in the input that the
+user submits, so prefilling it would write the secret straight back into the session
+transcript and undo the entire feature. Clipboard-only keeps the escape hatch usable
+while leaving no path for a prefilled submit to re-leak the value. There is **no `sec_reveal` tool**, and the tool registry must never gain
 one: restore is a user command path, not something the model can invoke.
 
 ### 6.3 Out of scope: ambient sources
