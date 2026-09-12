@@ -63,7 +63,7 @@ proceed if a check fails.
 | `tool_call` receives a `structuredClone` of the model's args | `pi-ai/dist/utils/validation.js:281` → `agent-loop.js:284,304` | Mutating `event.input` cannot reach the persisted `toolCall` block. Injection is invisible on disk. |
 | `tool_result` hook runs before the result message is built/persisted | `agent-session.js:244-266` | Scrubbing at write time propagates to every downstream consumer. |
 | `tool_execution_start` emits `toolCall.arguments`, not the mutated clone | `agent-loop.js:298-303, 334-339` | Live TUI renders the ref, never the value. |
-| `tool_execution_update` likewise emits original args | `agent-loop.js:468-471` | Streaming partials can't leak the value either. |
+| `tool_execution_update` emits original args **and the raw partial result** | `agent-loop.js:459-473` | Streamed *args* are safe; streamed *output* is **not** — partials bypass `tool_result` and render live, so the wrapped bash tool must scrub them (see §4 row 6b, §10). |
 | TUI renders call args from the message content block | `interactive-mode.js:2630, 3019` | Same for restored sessions and `/export`. |
 | `input` transforms happen before skill/template expansion **and** before persistence | `agent-session.js:843-852` | Capture-at-input means the value never touches the session file. |
 | The `context` hook is wired only via the agent's `transformContext` | `sdk.js:227-231` | It is **not** on the compaction path. |
