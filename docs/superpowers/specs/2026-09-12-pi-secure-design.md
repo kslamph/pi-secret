@@ -85,7 +85,7 @@ tool_result ─► [4] scrub ◄───┘         ▲
 context ─────► [4] scrub ──────────────┘
 before_provider_request ► [4] scrub (last mile)
 
-[2] ui: /sec add|list|rename|rm|test|restore|off  +  masked prompt  +  receipt entries
+[2] ui: /sec add|list|remove|rename|test|restore|off|on  +  masked prompt  +  receipt
 ```
 
 - **[1] vault** — `Map` on `globalThis.__PI_SECURE__`, keyed by session file. Memory

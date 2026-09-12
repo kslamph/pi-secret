@@ -23,12 +23,12 @@ One command, `/sec`, with eight subcommands:
 
 | Subcommand | Effect |
 |---|---|
-| `/sec add [name]` | Enter a value via a masked prompt (characters render as `•`); length + fingerprint shown on confirm. This session only. |
+| `/sec add <name>` | Enter a value via a masked prompt (characters render as `•`); length + fingerprint shown on confirm. This session only. |
 | `/sec list` | List entries: name, length, fingerprint, provenance. Never values. |
 | `/sec remove NAME` | Remove an entry from the vault. |
 | `/sec rename OLD NEW` | Rename an entry. |
 | `/sec test NAME` | Reprint a secret's length + fingerprint so you can confirm a capture without echoing it. |
-| `/sec restore NAME` | Copy a captured value back to your clipboard — never into chat, never into a tool result. There is no `sec_reveal` tool. |
+| `/sec restore NAME` | Copy a captured value back to your clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
 | `/sec off` | Suspend pi-secure for this session. |
 | `/sec on` | Re-enable pi-secure after `/sec off`. |
 
