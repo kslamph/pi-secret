@@ -57,14 +57,10 @@ export class Vault {
   add(name: string, value: string, source: SecretSource): PublicEntry {
     if (!isValidName(name)) throw new Error(`invalid secret name: ${JSON.stringify(name)}`);
     // Two names must never share a shell variable, or a command asking for one
-    // silently receives the other. Enforced here because this is the only place
-    // names enter; expandBash can then assume distinctness.
-    const clash = findEnvVarCollision(this.#map.keys(), name, this.#toVar);
-    if (clash !== undefined) {
-      throw new Error(
-        `secret name ${name} collides with ${clash} in shell variable ${this.#toVar(name)}`,
-      );
-    }
+    // silently receives the other. Enforced at both name-entry points, add() and
+    // rename(); expandBash can then assume distinctness.
+    this.#assertNoCollision(name);
+
     if (!value || !value.trim()) throw new Error(`secret ${name} is empty`);
     if (Buffer.byteLength(value, "utf8") > MAX_REF_BYTES) {
       throw new Error(`secret ${name} is too large (>1MiB) — this looks like a file, not a token`);
@@ -99,9 +95,22 @@ export class Vault {
   rename(oldName: string, newName: string): boolean {
     const entry = this.#map.get(oldName);
     if (!entry || !isValidName(newName) || this.#map.has(newName)) return false;
+    // rename() is the SECOND place a name enters the vault; guarding only add()
+    // would let `/sec rename` move a secret onto a colliding variable.
+    this.#assertNoCollision(newName, oldName);
     this.#map.delete(oldName);
     this.#map.set(newName, { ...entry, name: newName });
     return true;
+  }
+  #assertNoCollision(name: string, ignore?: string): void {
+    const clash = findEnvVarCollision(
+      [...this.#map.keys()].filter((k) => k !== ignore),
+      name,
+      this.#toVar,
+    );
+    if (clash !== undefined) {
+      throw new Error(`secret name ${name} collides with ${clash} in shell variable ${this.#toVar(name)}`);
+    }
   }
   names(): string[] {
     return [...this.#map.keys()];

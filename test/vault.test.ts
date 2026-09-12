@@ -147,6 +147,28 @@ describe("Vault", () => {
     expect(w.names()).toEqual(["first"]);
   });
 
+  it("refuses a rename onto a colliding variable too", () => {
+    // Flat-for-the-pair, not flat-for-everything: an always-flat resolver would
+    // make the second add() throw during setup (every name collides with every
+    // other), so only second/third share a variable and the rename targets it.
+    const flat = (n: string) =>
+      n === "second" || n === "third" ? "__PISEC_FLAT_0000000000000000" : `__PISEC_${n.toUpperCase()}`;
+    const w = new Vault("t", flat);
+    w.add("first", GH, "prompt");
+    w.add("second", K, "paste");
+    const real = new Vault("t");
+    real.add("a-b", GH, "prompt");
+    expect(() => w.rename("first", "third")).toThrow(/collides with/);
+    expect(real.rename("a-b", "a_b")).toBe(true);
+    expect(real.names()).toEqual(["a_b"]);
+  });
+
+  it("accepts punctuation-variant names that really do differ", () => {
+    v.add("a-b", GH, "prompt");
+    expect(() => v.add("a_b", K, "paste")).not.toThrow();
+    expect(v.names()).toEqual(["a-b", "a_b"]);
+  });
+
   it("hides values from util.inspect, not just JSON.stringify", () => {
     v.add("gh_pat", GH, "prompt");
     expect(inspect(v)).not.toContain(GH);
