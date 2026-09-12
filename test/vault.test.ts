@@ -9,7 +9,16 @@ import {
   vaultForSession,
   __vaultRegistryForTests,
 } from "../src/vault.ts";
-import { derivedForms, envVarName, findEnvVarCollision, fingerprint, isValidName, parseRef } from "../src/refs.ts";
+import {
+  derivedForms,
+  envVarName,
+  findEnvVarCollision,
+  fingerprint,
+  isValidName,
+  parseRef,
+  refToken,
+} from "../src/refs.ts";
+import { findRefs } from "../src/substitute.ts";
 
 const K = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -28,6 +37,17 @@ describe("name and ref parsing", () => {
     expect(parseRef("{{sec:gh_pat}}")).toBe("gh_pat");
     expect(parseRef("{{sec:no}}pe")).toBeUndefined();
     expect(parseRef("plain")).toBeUndefined();
+  });
+
+  // isValidName, REF_RE and parseRef are three independent literals that must agree
+  // on the 64-char cap. Pin each one, or widening any of them passes the suite.
+  it("caps a name at 64 characters in all three expressions", () => {
+    expect(isValidName("x".repeat(64))).toBe(true);
+    expect(isValidName("x".repeat(65))).toBe(false);
+    expect(parseRef(refToken("x".repeat(64)))).toBe("x".repeat(64));
+    expect(parseRef(refToken("x".repeat(65)))).toBeUndefined();
+    expect(findRefs(refToken("x".repeat(64))).map((r) => r.name)).toEqual(["x".repeat(64)]);
+    expect(findRefs(refToken("x".repeat(65)))).toEqual([]);
   });
 });
 
