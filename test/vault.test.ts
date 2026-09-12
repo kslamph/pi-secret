@@ -97,6 +97,17 @@ describe("Vault", () => {
     expect(safe).not.toHaveProperty("value");
   });
 
+  it("refuses two names that would share one shell variable", () => {
+    // a-b and a_b differ by design (sha256 tag over the whole name), so this uses
+    // a birthday-found pair whose 40-char sanitized window AND 8-hex sha256 tag
+    // are equal: the exact collision the entry check exists to refuse.
+    const first = "x".repeat(45) + "4a5";
+    const second = "x".repeat(45) + "1y32";
+    v.add(first, GH, "prompt");
+    expect(() => v.add(second, K, "paste")).toThrow(/collides with/);
+    expect(v.names()).toEqual([first]);
+  });
+
   it("clear() wipes values and reports how many", () => {
     v.add("a", GH, "prompt");
     v.add("b", K, "paste");

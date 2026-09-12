@@ -26,6 +26,20 @@ export function derivedForms(value: string): string[] {
   return [value, buf.toString("base64"), buf.toString("base64url"), buf.toString("hex")];
 }
 
+/**
+ * The shell variable a secret is exported as. `name` is public, so this digest is
+ * a collision suppressor, not a secret: 8 hex of sha256 over the *whole* name, so
+ * two names that sanitize identically (a-b vs a_b) still differ, and an attacker
+ * cannot walk a 16-bit tag offline to force a match.
+ *
+ * Bound: 8 (prefix) + 40 (sanitized) + 1 + 8 = 57 chars, valid POSIX identifier.
+ */
+export function envVarName(name: string): string {
+  const sanitized = name.toUpperCase().replace(/[^A-Z0-9]/g, "_").slice(0, 40);
+  const tag = createHash("sha256").update(name, "utf8").digest("hex").slice(0, 8);
+  return `__PISEC_${sanitized}_${tag}`;
+}
+
 export function refToken(name: string): string {
   return `{{sec:${name}}}`;
 }

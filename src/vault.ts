@@ -1,4 +1,4 @@
-import { MAX_REF_BYTES, fingerprint, isValidName } from "./refs.ts";
+import { MAX_REF_BYTES, envVarName, fingerprint, isValidName } from "./refs.ts";
 
 export type SecretTier = "session" | "ambient";
 export type SecretSource = "prompt" | "paste";
@@ -48,6 +48,15 @@ export class Vault {
 
   add(name: string, value: string, source: SecretSource): VaultEntry {
     if (!isValidName(name)) throw new Error(`invalid secret name: ${JSON.stringify(name)}`);
+    // Two names must never share a shell variable, or a command asking for one
+    // silently receives the other. Enforced here because this is the only place
+    // names enter; expandBash can then assume distinctness.
+    const candidate = envVarName(name);
+    for (const other of this.map.keys()) {
+      if (other !== name && envVarName(other) === candidate) {
+        throw new Error(`secret name ${name} collides with ${other} in shell variable ${candidate}`);
+      }
+    }
     if (!value || !value.trim()) throw new Error(`secret ${name} is empty`);
     if (Buffer.byteLength(value, "utf8") > MAX_REF_BYTES) {
       throw new Error(`secret ${name} is too large (>1MiB) — this looks like a file, not a token`);

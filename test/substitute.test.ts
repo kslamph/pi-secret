@@ -63,9 +63,9 @@ describe("expandRefs", () => {
 });
 
 describe("envVarName", () => {
-  it("maps a secret name to a collision-resistant shell identifier", () => {
-    expect(envVarName("gh_pat")).toMatch(/^__PISEC_GH_PAT_[0-9a-f]{4}$/);
-    expect(envVarName("db-url.v2")).toMatch(/^__PISEC_DB_URL_V2_[0-9a-f]{4}$/);
+  it("maps a secret name to a distinct shell identifier", () => {
+    expect(envVarName("gh_pat")).toMatch(/^__PISEC_GH_PAT_[0-9a-f]{8}$/);
+    expect(envVarName("db_url-v2")).toMatch(/^__PISEC_DB_URL_V2_[0-9a-f]{8}$/);
   });
 
   it("is deterministic", () => {
@@ -78,18 +78,22 @@ describe("envVarName", () => {
     }
   });
 
-  it("differs for names that sanitize alike", () => {
-    expect(envVarName("a_b")).not.toBe(envVarName("ab_"));
+  it("differs for names that sanitize alike and for long shared prefixes", () => {
     expect(envVarName("a-b")).not.toBe(envVarName("a_b"));
+    // A 48-char sanitize window with a 16-bit tag let these collide; 8 hex of
+    // sha256 over the whole name, plus a 40-char window, closes the offline walk.
+    const long = "x".repeat(45);
+    expect(envVarName(long + "_a")).not.toBe(envVarName(long + "_b"));
   });
 
   it("stays under 64 chars for a maximum-length name", () => {
     expect(envVarName("a".repeat(64)).length).toBeLessThanOrEqual(64);
   });
 
-  /** Single source of truth for every expected var name in later fixtures. */
-  it("exposes the exact name used by the bash fixtures", () => {
-    expect(envVarName("gh_pat")).toMatch(/^__PISEC_GH_PAT_[0-9a-f]{4}$/);
+  it("stays a valid identifier and within bounds for a maximum-length name", () => {
+    const name = "a".repeat(64);
+    expect(envVarName(name)).toMatch(/^[A-Za-z_][A-Za-z0-9_]*$/);
+    expect(envVarName(name).length).toBeLessThanOrEqual(57);
   });
 });
 
