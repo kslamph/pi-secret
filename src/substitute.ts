@@ -1,25 +1,6 @@
-import { REF_RE } from "./refs.ts";
+import { REF_RE, type SecretResolver } from "./refs.ts";
 
-export { envVarName } from "./refs.ts";
-
-export interface Ref {
-  raw: string;
-  name: string;
-  start: number;
-  end: number;
-}
-
-export type SecretResolver = (name: string) => string | undefined;
-
-export function findRefs(text: string): Ref[] {
-  const refs: Ref[] = [];
-  REF_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = REF_RE.exec(text))) {
-    refs.push({ raw: m[0], name: m[1] as string, start: m.index, end: m.index + m[0].length });
-  }
-  return refs;
-}
+export { envVarName, findRefs, type Ref, type SecretResolver } from "./refs.ts";
 
 export function expandRefs(text: string, resolve: SecretResolver): { text: string; used: string[]; missing: string[] } {
   const used: string[] = [];

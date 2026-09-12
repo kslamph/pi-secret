@@ -2,6 +2,25 @@ import { createHash } from "node:crypto";
 
 /** Shared by injection and scrubbing so both agree on what a ref looks like. */
 export const REF_RE = /\{\{sec:([a-z][a-z0-9_-]{0,63})\}\}/g;
+
+export interface Ref {
+  raw: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
+export type SecretResolver = (name: string) => string | undefined;
+
+export function findRefs(text: string): Ref[] {
+  const refs: Ref[] = [];
+  REF_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = REF_RE.exec(text))) {
+    refs.push({ raw: m[0], name: m[1] as string, start: m.index, end: m.index + m[0].length });
+  }
+  return refs;
+}
 export const MAX_REF_BYTES = 1024 * 1024;
 /** Guards against a 1-char value chewing up unrelated text. */
 export const MIN_SCRUBABLE_LENGTH = 8;
