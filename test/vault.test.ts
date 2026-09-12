@@ -137,13 +137,14 @@ describe("Vault", () => {
   });
 
   it("refuses a name whose shell variable is already taken", () => {
-    // Injected resolver: a genuine 64-bit collision is not findable in a test.
+    // A genuine 64-bit collision is not findable, and vi.mock("../src/refs.ts")
+    // would not help: the guard's default resolver binds refs.ts's own export, so
+    // a module mock changes the message, not the comparison. Inject the resolver.
     const flat = () => "__PISEC_FLAT_0000000000000000";
-    expect(findEnvVarCollision(["first"], "second", flat)).toBe("first");
-    expect(findEnvVarCollision(["first"], "second", envVarName)).toBeUndefined();
-    v.add("a-b", GH, "prompt");
-    expect(() => v.add("a_b", K, "paste")).not.toThrow();
-    expect(v.names()).toEqual(["a-b", "a_b"]);
+    const w = new Vault("t", flat);
+    w.add("first", GH, "prompt");
+    expect(() => w.add("second", K, "paste")).toThrow(/collides with/);
+    expect(w.names()).toEqual(["first"]);
   });
 
   it("hides values from util.inspect, not just JSON.stringify", () => {

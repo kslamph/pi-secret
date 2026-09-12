@@ -44,9 +44,14 @@ export class Vault {
   // runtime, so util.inspect(v, {customInspect:false}) and structuredClone(v) both
   // reach the values. A real private field is unreachable by either.
   #map = new Map<string, VaultEntry>();
+  #toVar: (n: string) => string;
 
-  constructor(scopeKey: string) {
+  // `toVar` is injectable so the collision guard's throw is testable: a genuine
+  // 64-bit collision cannot be found in a test, and vi.mock cannot fake it either
+  // because the default resolver binds to this module's own `envVarName`.
+  constructor(scopeKey: string, toVar: (n: string) => string = envVarName) {
     this.#scopeKey = scopeKey;
+    this.#toVar = toVar;
   }
 
   add(name: string, value: string, source: SecretSource): PublicEntry {
@@ -54,10 +59,10 @@ export class Vault {
     // Two names must never share a shell variable, or a command asking for one
     // silently receives the other. Enforced here because this is the only place
     // names enter; expandBash can then assume distinctness.
-    const clash = findEnvVarCollision(this.#map.keys(), name);
+    const clash = findEnvVarCollision(this.#map.keys(), name, this.#toVar);
     if (clash !== undefined) {
       throw new Error(
-        `secret name ${name} collides with ${clash} in shell variable ${envVarName(name)}`,
+        `secret name ${name} collides with ${clash} in shell variable ${this.#toVar(name)}`,
       );
     }
     if (!value || !value.trim()) throw new Error(`secret ${name} is empty`);
