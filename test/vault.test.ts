@@ -106,6 +106,16 @@ describe("Vault", () => {
     expect(envVarName(long + "4a5")).not.toBe(envVarName(long + "1y32"));
   });
 
+  it("never yields the same variable across a 20k-name corpus", () => {
+    const seen = new Map<string, string>();
+    for (let i = 0; i < 20000; i++) {
+      const name = ("c" + i.toString(36)).padEnd(2, "z").slice(0, 64);
+      const varName = envVarName(name);
+      expect(seen.has(varName), `collided with ${seen.get(varName)}`).toBe(false);
+      seen.set(varName, name);
+    }
+  });
+
   it("refuses a name whose shell variable is already taken", () => {
     // Injected resolver: a genuine 64-bit collision is not findable in a test.
     const flat = () => "__PISEC_FLAT_0000000000000000";
