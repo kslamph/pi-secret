@@ -404,7 +404,16 @@ executing a command that would send the literal placeholder.
    environment. The reason not to leave it permanently: a model whose `{{sec:x}}` echoes back as
    `$VAR` will try to fix it, and the obvious fix is asking the user to paste the token into a
    command — the one path this design exists to close.
-10. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
+10. **Two shape-masking limits are chosen, not accidental.** (a) A *raw* secret folded across
+    lines by `fold`/`fmt` is not caught: whitespace-tolerant matching applies only to the derived
+    encodings (base64, base64url, hex), because tolerating it for raw values made an 8-character
+    vault entry mask `abc def ghi` out of ordinary prose — `MIN_SCRUBABLE_LENGTH` is 8, so that is
+    reachable, and eating output the model needs is its own failure. (b) A key=value credential
+    containing `<` or `>` masks up to that character, because a value class that swallows angle
+    brackets starts consuming markup. Encoded forms of vaulted values, including line-wrapped
+    base64 (`kubectl get secret -o yaml`, `git diff` of a credential file) and either hex case,
+    are covered — round 2 measured three leaks in exactly that area before fixing them.
+11. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
    raw secrets to a logging endpoint.** This is the largest accepted hole in the design, and
    it is a deliberate trade for file round-trip fidelity (§8.2). Flip the knob if you care
    more about the logger than about editing such files.
