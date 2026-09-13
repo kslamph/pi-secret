@@ -391,7 +391,20 @@ executing a command that would send the literal placeholder.
    by detector: reliably parsing shell is what this project's lexer has repeatedly failed
    at, and a fragile nested-shell detector would produce false blocks that read as
    pi-secure being broken.
-9. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
+9. **Bash lexical coverage is bounded by a two-scanner design, and three shapes are knowingly
+   left open until Task 15.** Delimiters must currently match `[A-Za-z_][A-Za-z0-9_]*`, but
+   bash accepts any unquoted word: `cat <<1`, `cat <<E-O-F`, `cat <<EOF.txt` all run, and their
+   bodies are then not excluded from quote tracking — with an even apostrophe count that is the
+   silent-non-delivery class again. `# cat <<EOF` is a comment in bash and registers an operator
+   here. And `$((m<<k))` is safe today only by accident: the narrow delimiter charset is the
+   single thing preventing it from matching as a heredoc operator, which is why widening the
+   charset must land in the same change as an arithmetic/comment context guard rather than on
+   its own. Severity: correctness and availability, not confidentiality — a mis-lexed command
+   either fails, or receives the literal variable name while the secret stays in the child
+   environment. The reason not to leave it permanently: a model whose `{{sec:x}}` echoes back as
+   `$VAR` will try to fix it, and the obvious fix is asking the user to paste the token into a
+   command — the one path this design exists to close.
+10. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
    raw secrets to a logging endpoint.** This is the largest accepted hole in the design, and
    it is a deliberate trade for file round-trip fidelity (§8.2). Flip the knob if you care
    more about the logger than about editing such files.
