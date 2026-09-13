@@ -32,15 +32,16 @@ interface QuoteScan {
  * these (or at index 0, or after newline/space/tab) begins a comment; `#` in
  * any other position is mid-word text (`echo a#b` stays one word).
  *
- * Measured against /bin/bash 5.x: `;|&()` are confirmed comment-start
- * boundaries; `<` is included (redirects take a word-sized filename target, so
- * `#` after `<` starts a comment just as after `;`); `>` is excluded even
- * though bash also comments there, because every `>#word` command is a syntax
- * error — the child never runs, so our classification cannot change delivery.
+ * Measured against /bin/bash: `;|&()` are confirmed comment-start boundaries.
+ * `<`, `>`, and `<<<` alike leave `#word` as a comment — `: >#f`, `echo hi >#log`,
+ * `: <#f`, `echo hi <#f`, `echo x <<<#f` all exit 2 with no file created, so the
+ * redirect is left without a target. Normalised to include `>` for symmetry
+ * with `<`: a `#` after either redirect operator is a comment, period.
+ *
  * `=` and `$()` are confirmed non-boundaries (`x=#hello` is a value,
  * `echo $(echo 1)#c` prints `1#c`).
  */
-const WORD_BOUNDARY = /[( )<;|&\t\n]/;
+const WORD_BOUNDARY = /[( )<>;|&\t\n]/;
 
 export interface HeredocRegion {
   /** Body text between the operator line and the terminator. */
@@ -80,14 +81,20 @@ function quoteIntervals(text: string, heredocBodies: HeredocRegion[] = []): Quot
       // not a delimiter.  Skip to the end of whichever body we are in.  The
       // terminator line is NOT part of the body region, so it is processed
       // normally (its characters set wordStart as any other code text would).
-      if (heredocBodies.length > 0) {
-        for (const body of heredocBodies) {
-          if (i >= body.start && i < body.end) {
-            i = body.end - 1; // loop will increment past the last body char
-            wordStart = true; // body ends with \n before the terminator line
-            break;
-          }
-        }
+      //
+      // Use find() + outer-loop continue, NOT an inner-loop break: a plain
+      // `break` exits only the inner for, then control falls through and
+      // evaluates the stale `ch` (the body's first character) at the post-jump
+      // index — a body opening with `'` would anchor a phantom sq span. The
+      // `continue` here targets this scan loop, skipping that stale-ch
+      // evaluation entirely. (Verified: changing `break` to `continue` is a
+      // no-op because both target the inner loop — this restructure is
+      // required.)
+      const body = heredocBodies.find((b) => i >= b.start && i < b.end);
+      if (body) {
+        i = body.end - 1; // loop will increment past the last body char
+        wordStart = true; // body ends with \n before the terminator line
+        continue; // req6: never re-process the stale `ch` at the new index
       }
       if (ch === "'") {
         state = "sq";
@@ -110,13 +117,16 @@ function quoteIntervals(text: string, heredocBodies: HeredocRegion[] = []): Quot
           i++;
           wordStart = false;
         } else if (next === "\\") {
-          i++; // \$ is an escaped dollar — wordStart unchanged
+          i++; // \$ is an escaped dollar — clears wordStart (word text, req 7)
+          wordStart = false;
         } else {
           wordStart = false; // $ followed by a regular character
         }
       } else if (ch === "\\" && i + 1 < text.length) {
-        i++; // escape pair — wordStart unchanged (escaped char is word text,
-             // but the escape itself does not start a new word)
+        i++; // escape pair: \<char> is word text, so it clears wordStart
+             // (req 7 — leaving it inherited lets a later `#` be misread as a
+             //  comment start after a preceding boundary like `)`)
+        wordStart = false;
       } else if (ch === "#" && wordStart) {
         // Comment to end of line; the newline itself stays in code state.
         const nl = text.indexOf("\n", i);
@@ -164,13 +174,12 @@ function quoteIntervals(text: string, heredocBodies: HeredocRegion[] = []): Quot
 const HEREDOC_RE = /<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3/g;
 
 export function heredocRegions(text: string): HeredocRegion[] {
-  const { sq, dq, ansq, loc } = quoteIntervals(text);
-  const swallowed = (index: number): boolean =>
-    sq.some((r) => index >= r.start && index < r.end) ||
-    dq.some((r) => index >= r.start && index < r.end) ||
-    ansq.some((r) => index >= r.start && index < r.end) ||
-    loc.some((r) => index >= r.start && index < r.end);
-
+  // Built incrementally: each operator's swallowed-check is computed against
+  // quoteIntervals(text, regions), where `regions` holds every body found so
+  // far. Operators are examined left-to-right, so every body preceding the
+  // current operator is already known — the quote scan skips them, preventing
+  // an earlier body's apostrophes from fabricating a span that hides a later
+  // `<<` (requirement 5).
   const regions: HeredocRegion[] = [];
   // Just past the previously consumed terminator line; -1 = none consumed yet.
   // Bodies follow their operators in the same left-to-right order, so a second
@@ -183,10 +192,18 @@ export function heredocRegions(text: string): HeredocRegion[] {
     const opStart = m.index;
     // `<<<word` is a here-string; this `<<` is its tail, not an operator.
     if (opStart > 0 && text[opStart - 1] === "<") continue;
-    // An operator a quote swallows (`echo '<<EOF'`, `echo "<<EOF"`) is plain text.
-    if (swallowed(opStart)) continue;
     // So is `<<` inside an already-consumed heredoc body: bodies are data.
     if (regions.some((r) => opStart >= r.start && opStart < r.end)) continue;
+    // Recompute swallowed per operator: quoteIntervals(text, regions) skips the
+    // bodies found so far, so body apostrophes can't pair with later code-state
+    // quotes into a phantom span that hides this operator.
+    const { sq, dq, ansq, loc } = quoteIntervals(text, regions);
+    const isSwallowed =
+      sq.some((r) => opStart >= r.start && opStart < r.end) ||
+      dq.some((r) => opStart >= r.start && opStart < r.end) ||
+      ansq.some((r) => opStart >= r.start && opStart < r.end) ||
+      loc.some((r) => opStart >= r.start && opStart < r.end);
+    if (isSwallowed) continue;
 
     const delimiter = m[4] as string;
     const dash = Boolean(m[1]);

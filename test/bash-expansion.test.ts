@@ -214,4 +214,44 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
     expect(out.missing).toEqual([]);
     expect(out.command).toContain(`"$${GH_ENV}"`);
   });
+
+  it("does not let a body that opens with a quote corrupt the scan", () => {
+    // Regression for requirement 6: the heredoc jump used to fall through and process
+    // the body's first character with a stale index.
+    const out = expandBash("cat <<EOF\n'don't\nEOF\necho {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(`echo "$${GH_ENV}"`);
+  });
+
+  it("clears wordStart across an escape pair at a genuine word start", () => {
+    // Requirement 7. `)` sets the flag, the escape must clear it; bash reads one word
+    // here (`echo y=a;#bc q d`), so `#` is text and the sq span must be recorded.
+    const src = "echo $(printf a)\\;#b'c {{sec:gh_pat}} d'";
+    const out = expandBash(src, resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(`'"$${GH_ENV}"'`); // spliced, not bare
+    expect(out.command).not.toMatch(/'c? ?"\$[^""]*" ?d'/); // never bare inside sq
+  });
+
+  it("excludes every body when a prose apostrophe could hide a later operator", () => {
+    // Odd body apostrophes in an EARLIER body fabricated a span that swallowed the
+    // second `<<EOF`, so that body was never excluded — see requirement 5.
+    const two = expandBash(
+      "cat <<'MSG'\nDon't do this\nMSG\ncat <<EOF\nIt's fine\nEOF\necho {{sec:gh_pat}}",
+      resolve,
+    );
+    expect(two.missing).toEqual([]);
+    expect(two.command).toContain(`echo "$${GH_ENV}"`);
+    const even = expandBash(
+      "cat <<'MSG'\nDon't do this\nMSG\ncat <<EOF\nIt's fine\nEOF\necho {{sec:gh_pat}} && echo 'x'",
+      resolve,
+    );
+    expect(even.missing).toEqual([]);
+    expect(even.command).not.toContain(`'"$`);
+  });
+
+  it("still blocks a heredoc operator that a real quote swallows", () => {
+    const out = expandBash("echo '<<EOF'\ndon't\nEOF\necho {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+  });
 });
