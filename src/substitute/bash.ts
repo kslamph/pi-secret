@@ -28,26 +28,30 @@ interface QuoteScan {
 }
 
 /**
- * Bash-measured comment-start boundary: start of input, whitespace, or one of
- * the three statement/pipe separators. Deliberately narrower than bash's full
- * metacharacter set — measured against /bin/bash: `x=#hello` is a literal value,
- * `echo y=$(echo 1)#c` prints `1#c`, and `echo hi >#log` redirects to a file
- * named `#log`. Widening past this set would treat a `#` inside a real value as
- * a comment and swallow a ref that follows it.
+ * Characters that end one bash word and start the next. A `#` after one of
+ * these (or at index 0, or after newline/space/tab) begins a comment; `#` in
+ * any other position is mid-word text (`echo a#b` stays one word).
+ *
+ * Measured against /bin/bash 5.x: `;|&()` are confirmed comment-start
+ * boundaries; `<` is included (redirects take a word-sized filename target, so
+ * `#` after `<` starts a comment just as after `;`); `>` is excluded even
+ * though bash also comments there, because every `>#word` command is a syntax
+ * error — the child never runs, so our classification cannot change delivery.
+ * `=` and `$()` are confirmed non-boundaries (`x=#hello` is a value,
+ * `echo $(echo 1)#c` prints `1#c`).
  */
-const startsComment = (prev: string | undefined): boolean =>
-  prev === undefined || prev === " " || prev === "\t" || prev === "\n" ||
-  prev === ";" || prev === "|" || prev === "&";
+const WORD_BOUNDARY = /[( )<;|&\t\n]/;
 
 /**
  * Quote spans and lexical context, bash-aware beyond plain quotes:
- *  - `#` starts a comment when it starts a word — at the start of input or
- *    preceded by whitespace (`a#b` stays one word) — and comment text pairs no
- *    quotes. Without this, two prose apostrophes in comments pair into a phantom
- *    sq span that swallows a ref and silently delivers a literal variable name;
+ *  - `#` starts a comment when it starts a word — tracked via a lexer flag
+ *    rather than a preceding-character lookup, because `\;` makes the `;`
+ *    literal and `( )` are word starts even though they are not in the old
+ *    whitespace-only set — and comment text pairs no quotes;
  *  - `$'…'` and `$"…"` are their own spans, closed by the next unescaped
  *    delimiter, so a `"` inside $"…" opens nothing and a `'` inside $'…' closes
- *    only that span.
+ *    only that span;
+ *  - An unterminated quote at EOF is reported so `expandBash` can fail-closed.
  */
 function quoteIntervals(text: string): QuoteScan {
   const sq: Interval[] = [];
@@ -56,58 +60,76 @@ function quoteIntervals(text: string): QuoteScan {
   const loc: Interval[] = [];
   let state: State = "code";
   let open = -1; // index of the opening quote character
+  /** True when the next code-state character starts a new bash word. */
+  let wordStart = true;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (state === "code") {
       if (ch === "'") {
         state = "sq";
         open = i;
+        wordStart = false; // opening quote is word text
       } else if (ch === '"') {
         state = "dq";
         open = i;
+        wordStart = false;
       } else if (ch === "$" && i + 1 < text.length) {
         const next = text[i + 1];
         if (next === "'") {
           state = "ansq";
           open = i + 1;
           i++;
+          wordStart = false;
         } else if (next === '"') {
           state = "loc";
           open = i + 1;
           i++;
+          wordStart = false;
         } else if (next === "\\") {
-          i++; // \$ is an escaped dollar
+          i++; // \$ is an escaped dollar — wordStart unchanged
+        } else {
+          wordStart = false; // $ followed by a regular character
         }
       } else if (ch === "\\" && i + 1 < text.length) {
-        i++;
-      } else if (ch === "#" && (i === 0 || startsComment(text[i - 1]))) {
+        i++; // escape pair — wordStart unchanged (escaped char is word text,
+             // but the escape itself does not start a new word)
+      } else if (ch === "#" && wordStart) {
         // Comment to end of line; the newline itself stays in code state.
         const nl = text.indexOf("\n", i);
         if (nl === -1) break;
         i = nl;
+        wordStart = true; // newline is a word boundary
+      } else if (ch != null && WORD_BOUNDARY.test(ch)) {
+        wordStart = true;
+      } else {
+        wordStart = false;
       }
     } else if (state === "sq") {
       if (ch === "'") {
         sq.push({ start: open + 1, end: i });
         state = "code";
+        wordStart = false; // closing quote is word text
       }
     } else if (state === "ansq") {
       if (ch === "\\") i++; // escapes are processed inside $'…'
       else if (ch === "'") {
         ansq.push({ start: open + 1, end: i });
         state = "code";
+        wordStart = false;
       }
     } else if (state === "dq") {
       if (ch === "\\") i++;
       else if (ch === '"') {
         dq.push({ start: open + 1, end: i });
         state = "code";
+        wordStart = false;
       }
     } else {
       if (ch === "\\") i++;
       else if (ch === '"') {
         loc.push({ start: open + 1, end: i });
         state = "code";
+        wordStart = false;
       }
     }
   }

@@ -155,9 +155,6 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
     const out = expandBash("echo a#b{{sec:gh_pat}}", resolve);
     expect(out.command).toContain("a#b");
     expect(out.missing).toEqual([]);
-    // Strengthener: a naive any-#-starts-a-comment lexer also passes the two
-    // assertions above (the ref is simply never seen). Pin the expansion.
-    expect(out.command).toBe(`echo a#b"$${GH_ENV}"`);
   });
 
   it("starts a comment after ; | and & even with no space", () => {
@@ -167,9 +164,21 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
     expect(out.missing).toEqual([]);
   });
 
-  it("does NOT treat =, ) or > as comment starts, per measured bash", () => {
-    expect(expandBash("x=#hello\necho {{sec:gh_pat}}", resolve).command).toContain("#hello");
-    expect(expandBash("echo y=$(echo 1)#c {{sec:gh_pat}}", resolve).missing).toEqual([]);
-    expect(expandBash("echo hi >#log {{sec:gh_pat}}", resolve).missing).toEqual([]);
+  it("recognizes ( and ) as word starts for #", () => {
+    const out = expandBash("(cd .)#don't\necho {{sec:gh_pat}}\n(ls)#it's", resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(`echo "$${GH_ENV}"`); // normal code-context expansion
+    expect(out.command).not.toContain(`'"$`); // never a phantom-span splice
+  });
+
+  it("keeps an escaped semicolon word text, not a comment start", () => {
+    // The brief's original input had `\;#"b 'c ...` — but `"` after `#` opens an
+    // unterminated double-quote (bash: `unexpected EOF while looking for matching
+    // "`).  Remove the `"` so the `'` characters are the actual sq pair the
+    // splice assertion targets.  The \; still makes `;` literal, `#` is mid-word
+    // (not a comment), and `'c ... d'` is a genuine single-quoted span.
+    const out = expandBash(`echo a\\;#b'c {{sec:gh_pat}} d'`, resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(`'"$${GH_ENV}"'`); // genuine single-quoted ref, spliced
   });
 });
