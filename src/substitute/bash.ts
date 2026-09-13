@@ -42,8 +42,19 @@ interface QuoteScan {
  */
 const WORD_BOUNDARY = /[( )<;|&\t\n]/;
 
+export interface HeredocRegion {
+  /** Body text between the operator line and the terminator. */
+  start: number;
+  end: number;
+  /** A quoted delimiter ('EOF' / "EOF" / \\EOF) suppresses parameter expansion. */
+  inert: boolean;
+}
+
 /**
  * Quote spans and lexical context, bash-aware beyond plain quotes:
+ *  - Heredoc bodies (both quoted and unquoted delimiters) are skipped entirely:
+ *    every quote character inside is literal text, not a delimiter, and no quote
+ *    state is carried across the body into the code that follows;
  *  - `#` starts a comment when it starts a word — tracked via a lexer flag
  *    rather than a preceding-character lookup, because `\;` makes the `;`
  *    literal and `( )` are word starts even though they are not in the old
@@ -53,7 +64,7 @@ const WORD_BOUNDARY = /[( )<;|&\t\n]/;
  *    only that span;
  *  - An unterminated quote at EOF is reported so `expandBash` can fail-closed.
  */
-function quoteIntervals(text: string): QuoteScan {
+function quoteIntervals(text: string, heredocBodies: HeredocRegion[] = []): QuoteScan {
   const sq: Interval[] = [];
   const dq: Interval[] = [];
   const ansq: Interval[] = [];
@@ -65,6 +76,19 @@ function quoteIntervals(text: string): QuoteScan {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (state === "code") {
+      // Heredoc bodies are literal text: every quote character there is data,
+      // not a delimiter.  Skip to the end of whichever body we are in.  The
+      // terminator line is NOT part of the body region, so it is processed
+      // normally (its characters set wordStart as any other code text would).
+      if (heredocBodies.length > 0) {
+        for (const body of heredocBodies) {
+          if (i >= body.start && i < body.end) {
+            i = body.end - 1; // loop will increment past the last body char
+            wordStart = true; // body ends with \n before the terminator line
+            break;
+          }
+        }
+      }
       if (ch === "'") {
         state = "sq";
         open = i;
@@ -134,14 +158,6 @@ function quoteIntervals(text: string): QuoteScan {
     }
   }
   return { sq, dq, ansq, loc, unterminated: state === "code" ? null : { state, index: open } };
-}
-
-export interface HeredocRegion {
-  /** Body text between the operator line and the terminator. */
-  start: number;
-  end: number;
-  /** A quoted delimiter ('EOF' / "EOF" / \\EOF) suppresses parameter expansion. */
-  inert: boolean;
 }
 
 /** Matches `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\\EOF` at a word position. */
@@ -228,7 +244,7 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
   const inInertRegion = (index: number): boolean =>
     regions.some((r) => r.inert && index >= r.start && index < r.end);
 
-  const { sq, dq, ansq, loc, unterminated } = quoteIntervals(command);
+  const { sq, dq, ansq, loc, unterminated } = quoteIntervals(command, regions);
   const edits: Array<{ start: number; end: number; text: string }> = [];
 
   for (const ref of findRefs(command)) {

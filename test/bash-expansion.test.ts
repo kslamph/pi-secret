@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { expandBash, type BashExpansion } from "../src/substitute.ts";
 import { bashCases, DB, DB_ENV, GH, GH_ENV, SPACED, SPACED_ENV } from "./bash-quote-table.ts";
 
-/** A value every shell metacharacter; delivered verbatim, it must never touch argv or shell syntax. */
-const HOSTILE = "tok_en;$(reboot)' | rm -rf *";
+/** A benign witness: if the value is ever executed as shell, this file appears. */
+const HOSTILE = "$(touch /tmp/pi-secure-pwned)";
 
 const resolve = (name: string): string | undefined =>
   name === "gh_pat" ? "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
@@ -113,11 +113,20 @@ describe("expandBash — bash agrees", () => {
   });
 
   it("a hostile value reaches the child verbatim, never through argv or the shell", async () => {
+    const marker = "/tmp/pi-secure-pwned";
+    // Ensure the marker does not pre-exist.
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync(marker); } catch { /* ENOENT is expected */ }
     const out = expandBash(`printf '<%s>' '{{sec:hostile}}'`, resolve);
     expect(out.missing).toEqual([]);
     // bashRun asserts the command text carries no value; this asserts the child
     // sees the hostile value as exactly one argument, unexecuted and unexpanded.
     expect(await bashRun(out)).toBe(`<${HOSTILE}>`);
+    // The marker must never have been created: the value was delivered as a
+    // string argument, not executed as shell.
+    let markerExists = true;
+    try { unlinkSync(marker); } catch { markerExists = false; }
+    expect(markerExists).toBe(false);
   });
 });
 
@@ -180,5 +189,29 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
     const out = expandBash(`echo a\\;#b'c {{sec:gh_pat}} d'`, resolve);
     expect(out.missing).toEqual([]);
     expect(out.command).toContain(`'"$${GH_ENV}"'`); // genuine single-quoted ref, spliced
+  });
+
+  it("does not let heredoc prose fabricate or extend a quote span", () => {
+    // Odd count: lone apostrophe in heredoc body must not trigger fail-closed
+    // for a ref in code context after the heredoc.
+    const odd = expandBash("cat <<EOF\ndon't\nEOF\necho {{sec:gh_pat}}", resolve);
+    expect(odd.missing).toEqual([]);
+    expect(odd.used).toEqual(["gh_pat"]);
+    expect(odd.command).toBe(`cat <<EOF\ndon't\nEOF\necho "$${GH_ENV}"`);
+    // Even count: body apostrophes must not pair with a later code-context
+    // quote to form a phantom span that swallows the ref.
+    const even = expandBash("cat <<EOF\ndon't\nEOF\necho {{sec:gh_pat}} && echo 'x'", resolve);
+    expect(even.missing).toEqual([]);
+    expect(even.command).not.toContain(`'"$`); // no phantom sq splice
+    expect(even.command).toBe(`cat <<EOF\ndon't\nEOF\necho "$${GH_ENV}" && echo 'x'`);
+  });
+
+  it("heredoc body apostrophe does not cause fail-closed for code after it", () => {
+    // Requirement 4: fail-closed fires only for genuine code-context quote
+    // uncertainty. A lone apostrophe in a heredoc body is not a quote in code
+    // context, so a ref after the heredoc must still expand.
+    const out = expandBash("cat <<EOF\ndon't\nEOF\necho {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual([]);
+    expect(out.command).toContain(`"$${GH_ENV}"`);
   });
 });
