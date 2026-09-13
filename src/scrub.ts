@@ -50,6 +50,11 @@ const JWT_RE = String.raw`eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0
 // masking: `aws_secret_access_key=wJal…EXAMPLEKEY&more` masked up to the `&` and
 // leaked the rest of a real secret in the clear. Over-masking a URL-ish tail costs
 // nothing; under-masking a password costs the whole design.
+// Backslash is likewise ALLOWED now (Req 11): a value terminated at `\` leaked the
+// post-backslash tail in the clear — the same partial-mask class of failure the `&`
+// regression test exists to prevent. `<` and `>` stay excluded — a value class that
+// swallows angle brackets eats markup; that residual limit is documented, not
+// broadened here.
 // The `(?!\{\{sec:)` before the capture is load-bearing, not decoration.
 // `scrubText` runs the value pass FIRST, so by the time shapes see the text a known
 // secret is already `{{sec:NAME}}`. Without the lookahead, KV_RE happily captures its
@@ -58,7 +63,7 @@ const JWT_RE = String.raw`eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0
 // text scrubbed twice loses every name permanently. Verified by measurement: without it
 // `password=<real gh token>` degrades on the second pass; with it the name survives and
 // genuine KV-shaped secrets (`api_key = wJalrXUt…`) still mask to the generic marker.
-const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|private[_-]?key)[A-Za-z0-9_\-]*["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>\\]{8,})`;
+const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|private[_-]?key)[A-Za-z0-9_\-]*["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>]{8,})`;
 
 /**
  * Excluded wholesale. The git-SHA rule matters most: pi prints 40-hex commit
@@ -112,26 +117,82 @@ function byLengthDesc(a: string, b: string): number {
   return b.length - a.length;
 }
 
-export function maskValues(text: string, secrets: readonly string[]): ScrubResult {
-  const forms: Array<{ form: string }> = [];
-  for (const value of secrets) {
-    if (value.length < MIN_SCRUBABLE_LENGTH) continue;
-    for (const form of derivedForms(value)) forms.push({ form });
+interface Form {
+  form: string;
+  token: string;
+}
+
+/**
+ * Whitespace map for Req 9: tool output wraps long tokens (MIME 76-col base64,
+ * `kubectl -o yaml`, PEM bodies, git diffs of credential files) across
+ * newlines/spaces that are NOT part of the secret. We match the form against a
+ * whitespace-collapsed copy and map the hit back to the real offsets so the ENTIRE
+ * wrapped span — including the inserted whitespace — is replaced, not just the
+ * first line.
+ *
+ * This rebuilds a collapsed view per hit and never builds a `\s*`-interleaved
+ * regex from the form: dozens of adjacent optional-whitespace alternations over a
+ * long line is how you earn catastrophic backtracking on a path that runs on every
+ * tool result.
+ */
+function stripWithIndex(text: string): { stripped: string; origPos: number[] } {
+  const chars: string[] = [];
+  const origPos: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") continue;
+    origPos[chars.length] = i;
+    chars.push(ch);
   }
-  forms.sort((a, b) => byLengthDesc(a.form, b.form));
+  return { stripped: chars.join(""), origPos };
+}
+
+/** The single matching primitive both maskValues and scrubText share, so the two
+ * value passes cannot drift apart and both stay longest-first. */
+function maskForms(text: string, forms: Form[]): ScrubResult {
+  if (!text || forms.length === 0) return { text, hits: 0 };
   let hits = 0;
   let out = text;
-  for (const { form } of forms) {
+  for (const { form, token } of forms) {
     if (form.length < MIN_SCRUBABLE_LENGTH) continue;
-    let cursor = out.indexOf(form);
-    if (cursor === -1) continue;
-    while (cursor !== -1) {
-      out = out.slice(0, cursor) + GENERIC + out.slice(cursor + form.length);
+    for (;;) {
+      const { stripped, origPos } = stripWithIndex(out);
+      const idx = stripped.indexOf(form);
+      if (idx === -1) break;
+      const start = origPos[idx]!;
+      // end is exclusive: one past the last matched char; the span covers any
+      // wrapping whitespace between form characters, which is what we want gone.
+      const end = (origPos[idx + form.length - 1] ?? start) + 1;
+      out = out.slice(0, start) + token + out.slice(end);
       hits++;
-      cursor = out.indexOf(form, cursor + GENERIC.length);
     }
   }
   return { text: out, hits };
+}
+
+/** Build the candidate form set for a set of secrets, longest form first. */
+function collectForms(secrets: readonly string[], tokenFor: (value: string) => string): Form[] {
+  const forms: Form[] = [];
+  for (const value of secrets) {
+    if (value.length < MIN_SCRUBABLE_LENGTH) continue;
+    const token = tokenFor(value);
+    for (const form of derivedForms(value)) {
+      if (form.length < MIN_SCRUBABLE_LENGTH) continue;
+      forms.push({ form, token });
+      // Req 10: an uppercase hex encoding of a vaulted secret is the same secret on
+      // the wire (`…toString('hex').toUpperCase()`), but derivedForms yields only the
+      // lowercase form. Add the uppercase twin — still a derived form, still keyed to
+      // the same name — rather than entropy-scanning arbitrary hex runs, which is
+      // what the brief explicitly forbids.
+      if (/^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token });
+    }
+  }
+  forms.sort((a, b) => byLengthDesc(a.form, b.form));
+  return forms;
+}
+
+export function maskValues(text: string, secrets: readonly string[]): ScrubResult {
+  return maskForms(text, collectForms(secrets, () => GENERIC));
 }
 
 export function maskShapes(text: string): ScrubResult {
@@ -154,19 +215,16 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
   let hits = 0;
 
   // Name-exact pass first: a vault value masks to its own ref so the model can reuse it.
-  const entries = vault.values();
-  for (const value of [...entries].sort(byLengthDesc)) {
-    if (value.length < MIN_SCRUBABLE_LENGTH) continue;
+  // Shares maskForms with maskValues (Req 9/10) so the two passes have identical
+  // matching semantics — longest-first, whitespace-tolerant, hex-case-agnostic.
+  const valueForms = collectForms(vault.values(), (value) => {
     const name = vault.findByValue(value)?.name;
-    const token = name ? `{{sec:${name}}}` : GENERIC;
-    for (const form of derivedForms(value)) {
-      let cursor = out.indexOf(form);
-      while (cursor !== -1) {
-        out = out.slice(0, cursor) + token + out.slice(cursor + form.length);
-        hits++;
-        cursor = out.indexOf(form, cursor + token.length);
-      }
-    }
+    return name ? `{{sec:${name}}}` : GENERIC;
+  });
+  const r = maskForms(out, valueForms);
+  if (r.hits) {
+    out = r.text;
+    hits += r.hits;
   }
 
   if (opts.shapes !== false) {

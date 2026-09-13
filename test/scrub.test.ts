@@ -41,6 +41,31 @@ describe("maskValues", () => {
   it("leaves text without secrets untouched", () => {
     expect(maskValues("nothing here", [GH]).hits).toBe(0);
   });
+
+  it("masks a line-wrapped base64 of a vaulted secret", () => {
+    const b64 = Buffer.from(GH).toString("base64");
+    const wrapped = b64.slice(0, 50) + "\n" + b64.slice(50);
+    expect(wrapped).toContain("\n");
+    const out = maskValues(wrapped, [GH]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
+
+  it("masks a space-separated base64 of a vaulted secret", () => {
+    const b64 = Buffer.from(GH).toString("base64");
+    const mid = Math.floor(b64.length / 2);
+    const spaced = b64.slice(0, mid) + " " + b64.slice(mid);
+    const out = maskValues(spaced, [GH]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
+
+  it("masks uppercase hex of a vaulted secret", () => {
+    const hex = Buffer.from(GH).toString("hex").toUpperCase();
+    const out = maskValues(hex, [GH]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
 });
 
 describe("maskShapes", () => {
@@ -110,6 +135,26 @@ describe("maskShapes", () => {
     const prose =
       "The renderer calls structuredClone(toolCall.arguments) before the hook, so mutation is safe.";
     expect(maskShapes(prose).hits).toBe(0);
+  });
+
+  it("masks a value tail cut by a backslash", () => {
+    // Regression: the KV value class excluded backslash, so the head was masked
+    // and everything after the backslash leaked in the clear — the same partial-mask
+    // failure the `&` tail test guards against, now on the backslash edge.
+    const line = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG\\bPxRfiCYEXAMPLEKEY";
+    const out = maskShapes(line);
+    expect(out.text).toBe("aws_secret_access_key = {{sec:redacted}}");
+    expect(out.text).not.toContain("bPxRfiCYEXAMPLEKEY");
+    expect(out.text).not.toContain("K7MDENG");
+  });
+
+  it("stops a KV capture at a JSON-ish closing quote instead of running on", () => {
+    // Guards the backslash edit: the value class must still exclude `"` so a quoted
+    // value terminates at its closing quote rather than consuming the trailing JSON.
+    const line = '{"api_key": "secretvalue", "noise": "y"}';
+    const out = maskShapes(line);
+    expect(out.text).toBe('{"api_key": "{{sec:redacted}}", "noise": "y"}');
+    expect(out.text).not.toContain("secretvalue");
   });
 });
 
