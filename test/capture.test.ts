@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyCapture, Candidate, CapturedItem, findCandidates, suggestName, suggestNames } from "../src/capture.ts";
+import { applyCapture, Candidate, CapturedItem, findCandidates, suggestNameForTest, suggestNames } from "../src/capture.ts";
 import { isValidName } from "../src/refs.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -84,18 +84,18 @@ describe("findCandidates", () => {
   });
 });
 
-describe("suggestName", () => {
+describe("suggestNameForTest", () => {
   it("derives a name from hint and nearby context", () => {
     const c = findCandidates(`use this for the staging deploy: ${GH}`)[0]!;
-    expect(suggestName(c, `use this for the staging deploy: ${GH}`, [])).toBe("gh_staging_deploy");
+    expect(suggestNameForTest(c, `use this for the staging deploy: ${GH}`, [])).toBe("gh_staging_deploy");
     // Stale expectation: the implementation joins the provider hint with up to TWO context
     // words (present.slice(0, 2)). "gh_staging" predated that.
   });
 
   it("appends a counter on collision", () => {
     const c = findCandidates(GH)[0]!;
-    expect(suggestName(c, GH, ["gh"])).toBe("gh-2");
-    expect(suggestName(c, GH, ["gh", "gh-2"])).toBe("gh-3");
+    expect(suggestNameForTest(c, GH, ["gh"])).toBe("gh-2");
+    expect(suggestNameForTest(c, GH, ["gh", "gh-2"])).toBe("gh-3");
     // The base derived from the bare token is "gh", so the collision must be against "gh".
     // Asserting "gh_token-2" tested nothing: that name was never in `taken`, so the counter
     // path never ran and the assertion held for any implementation.
@@ -103,7 +103,7 @@ describe("suggestName", () => {
 
   it("always returns a valid name", () => {
     const c = findCandidates("Xk9#vQ2zLm7$Wr4tYp8nB3sD6fHj")[0]!;
-    expect(suggestName(c, "Xk9#vQ2zLm7$Wr4tYp8nB3sD6fHj", [])).toMatch(/^[a-z][a-z0-9_-]{0,63}$/);
+    expect(suggestNameForTest(c, "Xk9#vQ2zLm7$Wr4tYp8nB3sD6fHj", [])).toMatch(/^[a-z][a-z0-9_-]{0,63}$/);
   });
 
   it("always returns a valid name even for adversarial hint/context", () => {
@@ -114,7 +114,7 @@ describe("suggestName", () => {
       Array.from({ length: 500 }, (_, i) => `word${i}`).join(" "),
     ];
     for (const ctx of cases) {
-      const name = suggestName(base, ctx, []);
+      const name = suggestNameForTest(base, ctx, []);
       expect(isValidName(name)).toBe(true);
       expect(name).toMatch(/^[a-z][a-z0-9_-]{0,63}$/);
     }
@@ -226,8 +226,8 @@ describe("round 2 — name from neighborhood, not whole message (Requirement D)"
     const line = `gh: ${GH}${filler} aws: ${AKIA}`;
     const ghC = findCandidates(line).find((c) => c.hint === "github")!;
     const awsC = findCandidates(line).find((c) => c.hint === "aws_access_key_id")!;
-    const ghName = suggestName(ghC, line, []);
-    const awsName = suggestName(awsC, line, []);
+    const ghName = suggestNameForTest(ghC, line, []);
+    const awsName = suggestNameForTest(awsC, line, []);
     expect(ghName).not.toContain("aws");
     expect(awsName).not.toContain("gh");
   });
@@ -481,5 +481,163 @@ describe("round 5 — K: degrade unsatisfiable reuse (no throw, caller reuse sti
     });
     expect(names.filter((n) => n === "a_name").length).toBe(cs.filter((c) => c.value === A).length);
     expect(names.filter((n) => n === "b_name").length).toBe(cs.filter((c) => c.value === B).length);
+  });
+});
+
+// ===== Task 17: capture precision and safety (L-R) =====
+// Every fixture below is a measured shape from task-17-brief.md; negative controls are verbatim.
+
+describe("task 17 — L: base64 padding re-attached exactly, not greedily", () => {
+  it("stores the full decodable base64 value (with ==) for auth=Basic ...", () => {
+    const text = "auth=Basic dXNlcjpwYXNzd29yZDEyMw==";
+    const cs = findCandidates(text);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe("dXNlcjpwYXNzd29yZDEyMw=="); // 24 chars, not the 22-char corrupt copy
+    expect(cs[0]!.value.length % 4).toBe(0); // decodable
+    const out = applyCapture(text, pair(cs, "cred"));
+    expect(out.text).toBe("auth=Basic {{sec:cred}}");
+    expect(out.text).not.toContain("dXNlcjpwYXNzd29yZDEyMw"); // no truncated leaked tail
+  });
+
+  it("reattaches exactly the padding present and never an unbounded = run", () => {
+    const with2 = findCandidates("see dXNlcjpwYXNzd29yZDEyMw== and more");
+    expect(with2).toHaveLength(1);
+    expect(with2[0]!.value).toBe("dXNlcjpwYXNzd29yZDEyMw=="); // 24, decodable
+    expect(with2[0]!.value.length % 4).toBe(0);
+    // three `=` is an unbounded run: the extra `=` must NOT be absorbed (would be invalid base64),
+    // so the value stays 22 chars WITHOUT padding rather than corrupting to 25.
+    const with3 = findCandidates("see dXNlcjpwYXNzd29yZDEyMw=== and more");
+    expect(with3).toHaveLength(1);
+    expect(with3[0]!.value).toBe("dXNlcjpwYXNzd29yZDEyMw");
+    expect(with3[0]!.value.length % 4).toBe(2);
+  });
+
+  it("does NOT treat an unbounded = run as padding (key=dXNlcg=x=y keeps dXNlcg=x=y)", () => {
+    const cs = findCandidates("key=dXNlcg=x=y");
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe("dXNlcg=x=y"); // shell assigns a=b; must stay captured as-is
+  });
+
+  it("rejects a len%4===1 residue (no padding) as not valid base64", () => {
+    // 21-char base64 with no `=`: pad would be 3, which is invalid, so it is left unpadded.
+    const cs = findCandidates("the value is AbCdEfGhIjKlMnOpQrStU now");
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe("AbCdEfGhIjKlMnOpQrStU");
+    expect(cs[0]!.value.length % 4).toBe(1);
+  });
+});
+
+describe("task 17 — M: bare base64 blob is captured, not silently leaked", () => {
+  const blob = "CzBVep/E6RM4XYKnzPEbQGWKr9T5I0ht"; // 24-byte random blob; contains '/'
+  it("captures a bare random base64 blob (with /) pasted without a keyword", () => {
+    expect(blob).toMatch(/\//); // this is exactly the shape the old token.includes("/") ban dropped
+    const cs = findCandidates(`the value is ${blob} thanks`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.confidence).toBe("entropy");
+    expect(cs[0]!.value).toBe(blob);
+    const out = applyCapture(`the value is ${blob} thanks`, pair(cs, "blob"));
+    expect(out.text).toBe("the value is {{sec:blob}} thanks");
+    expect(out.text).not.toContain(blob);
+  });
+  it("still captures the same blob behind api_key=", () => {
+    const cs = findCandidates(`api_key=${blob}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(blob);
+  });
+});
+
+describe("task 17 — N: url= defaults to NOT capturing plain links", () => {
+  it("does NOT capture image_url=, download_url=, or url= to a plain https link", () => {
+    expect(findCandidates("image_url=https://cdn.example.com/a/b/c.png?v=3 for the logo")).toEqual([]);
+    expect(findCandidates("download_url=https://releases.example.com/tool/1.2.3/tool-linux-x86_64.tar.gz")).toEqual([]);
+    expect(findCandidates("url=https://example.com")).toEqual([]);
+  });
+  it("DOES capture DATABASE_URL=postgres://user:pass@host:5432/app (userinfo)", () => {
+    const url = "postgres://admin:sup3rsecret@db.internal:5432/app";
+    const cs = findCandidates(`DATABASE_URL=${url}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(url);
+  });
+  it("DOES capture a slack webhook URL behind url=", () => {
+    const hook = "https://hooks.slack.com/services/T01234567/B01234567/EXAMPLE-NOT-A-REAL-WEBHOOK";
+    const cs = findCandidates(`url=${hook}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(hook);
+  });
+  it("does NOT capture a url= link whose only signal is a high-entropy path segment", () => {
+    // Refuted proposal: an entropy threshold (tool-linux-x86_64.tar.gz scores 4.00 > 3.9) cannot
+    // separate webhooks from downloads; the shape rule (userinfo/host/query) is what gates.
+    const dl = "https://releases.example.com/tool/1.2.3/tool-linux-x86_64.tar.gz";
+    expect(findCandidates(`url=${dl}`)).toEqual([]);
+  });
+});
+
+describe("task 17 — O: private-key paths excluded, not captured by keyword luck", () => {
+  it("does NOT capture ssh_key=/home/u/.ssh/id_rsa (path-valued)", () => {
+    expect(findCandidates("ssh_key=/home/u/.ssh/id_rsa")).toEqual([]);
+  });
+  it("does NOT capture private_key=/home/u/.ssh/id_rsa", () => {
+    expect(findCandidates("private_key=/home/u/.ssh/id_rsa")).toEqual([]);
+  });
+  it("does NOT capture key=/some/path/id_rsa (id_ basename)", () => {
+    expect(findCandidates("key=/some/path/id_rsa")).toEqual([]);
+  });
+  it("leaves key_file= uncaptured (negative control, no keyword match)", () => {
+    expect(findCandidates("key_file=/home/u/.ssh/id_rsa")).toEqual([]);
+  });
+});
+
+describe("task 17 — P: applyCapture checks name->value consistency and counts skips", () => {
+  it("skips a name bound to two distinct values instead of writing one name for both", () => {
+    const text = `one ${GH} two ${AKIA}`;
+    const cs = findCandidates(text);
+    const items: CapturedItem[] = [
+      { candidate: cs[0]!, name: "shared" },
+      { candidate: cs[1]!, name: "shared" },
+    ];
+    const out = applyCapture(text, items);
+    // exactly one value may carry the name; the conflict is skipped, never collapsed.
+    expect(out.captured).toHaveLength(1);
+    expect(out.skipped).toBe(1);
+    expect(new Set(out.captured.map((p) => p.name)).size).toBe(out.captured.length);
+    expect(out.captured[0]!.name).toBe("shared");
+    expect(out.captured[0]!.candidate.value === GH || out.captured[0]!.candidate.value === AKIA).toBe(true);
+  });
+  it("counts skips honestly: a stale span yields captured < items and skipped >= 1", () => {
+    const text = `here ${GH}`;
+    const cs = findCandidates(text);
+    const bad: CapturedItem = { candidate: { ...cs[0]!, value: "not-the-value" }, name: "x" };
+    const out = applyCapture(text, [bad]);
+    expect(out.captured).toHaveLength(0);
+    expect(out.skipped).toBe(1);
+    expect(out.text).toBe(text);
+  });
+});
+
+describe("task 17 — Q: singular namer only reachable as suggestNameForTest", () => {
+  it("suggestName is no longer exported; suggestNameForTest is", async () => {
+    const mod = await import("../src/capture.ts");
+    expect((mod as Record<string, unknown>).suggestName).toBeUndefined();
+    expect(typeof mod.suggestNameForTest).toBe("function");
+  });
+});
+
+describe("task 17 — R: key hint preferred, no doubled context words, names not deduped", () => {
+  it("names DATABASE_URL without doubling db (database_db_db -> database_url)", () => {
+    const url = "postgres://admin:sup3rsecret@db.internal:5432/app";
+    const cs = findCandidates(`DATABASE_URL=${url}`);
+    const names = suggestNames(cs, `DATABASE_URL=${url}`);
+    expect(names[0]).toBe("database_url");
+    expect(names[0]).not.toMatch(/db_db/);
+  });
+  it("does not dedupe or shorten names (same value reuses one name, by construction)", () => {
+    const cs = findCandidates(`see ${GH} also ${GH}`);
+    const names = suggestNames(cs, `see ${GH} also ${GH}`);
+    expect(names).toEqual(["gh", "gh"]); // valueName keyed by value; suffixing stays collision-free
+  });
+  it("prefers the full key hint (db_password -> db_password, not db)", () => {
+    const cs = findCandidates("db_password=Tr0ub4dor3xyzabcQ");
+    const names = suggestNames(cs, "db_password=Tr0ub4dor3xyzabcQ");
+    expect(names[0]).toBe("db_password");
   });
 });

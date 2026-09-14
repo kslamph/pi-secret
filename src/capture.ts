@@ -127,6 +127,69 @@ function finalizeKv(c: Candidate, text: string, extend: boolean): Candidate | nu
   return { ...cand, value: t.value, start: cand.start + t.left, end: cand.end - t.right };
 }
 
+// L: re-attach base64 padding that the entropy split set (which includes `=`) stripped off the
+// token. See the call site in findCandidates for the full rationale and the unbounded-`=` trap.
+function reattachBase64Padding(text: string, raw: string): string {
+  const len = raw.length;
+  if (len === 0) return raw;
+  const pad = (4 - (len % 4)) % 4;
+  if (pad === 0 || pad > 2) return raw; // 0 = no padding needed; >2 (i.e. 3) = invalid residue
+  let idx = text.indexOf(raw);
+  while (idx !== -1) {
+    const after = idx + raw.length;
+    let eq = 0;
+    while (after + eq < text.length && text[after + eq] === "=") eq++;
+    if (eq === pad) {
+      const next = text[after + eq];
+      if (next === undefined || /[\s"',;)\]}]/.test(next)) return raw + "=".repeat(pad);
+    }
+    idx = text.indexOf(raw, idx + 1);
+  }
+  return raw;
+}
+
+// N/O: post-filters on candidates, keyed on the captured key text / value shape — NOT inside the
+// regexes (extendKvToToken rewrites the value after the match, so an in-matcher test would run
+// against the wrong string; the matcher is also duplicated across three KV patterns).
+//
+// N: a `url`-keyed candidate (key text contains "url") captures a plain link only when the value
+// is itself credential-bearing: it carries userinfo (`://` with an `@` before the first `/`), its
+// host is a known credential-in-URL ingest endpoint, or its query carries a credential parameter.
+// Otherwise the link is benign docs/asset prose and must NOT be vaulted (the receipt must not
+// claim a credential was found). Webhooks/DSNs behind `url=` are kept; `image_url=`/
+// `download_url=`/`url=https://example.com` are dropped.
+const KNOWN_CRED_HOSTS = [
+  "hooks.slack.com", "api.slack.com", "discord.com", "api.discord.com",
+  "events.pagerduty.com", "hooks.pagerduty.com", "grafana.com",
+];
+const CRED_QUERY_PARAMS = ["sig", "token", "key", "password", "X-Amz-Credential", "X-Amz-Signature"];
+
+function isCredentialUrl(value: string): boolean {
+  const m = value.match(/^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)/i);
+  if (!m) return false; // not a URL at all -> the caller's other rules decide
+  const authority = m[2]!;
+  if (authority.includes("@")) return true; // userinfo: real credentials in the URL
+  const host = authority.replace(/^[^@]*@/, "").split(":")[0]!.toLowerCase();
+  if (KNOWN_CRED_HOSTS.some((h) => host === h || host.endsWith("." + h))) return true;
+  const q = value.includes("?") ? value.slice(value.indexOf("?")) : "";
+  if (CRED_QUERY_PARAMS.some((p) => new RegExp(`[?&]${p}=`, "i").test(q))) return true;
+  return false;
+}
+
+function isUrlKeyed(c: Candidate): boolean {
+  return /url/i.test(c.hint ?? "");
+}
+
+// O: a candidate whose value is a private-key *path* (path stem, or a key-file basename such as
+// id_*, *.pem, *.key, *.p12, *.pfx) is NOT a secret to capture here — real key material is Task
+// 12's deliberate block. This drops path-shaped values regardless of which keyword fired (e.g.
+// `ssh_key=/home/u/.ssh/id_rsa` currently vaults a pathname; it must not).
+function isPathValue(value: string): boolean {
+  if (/^(\.?\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(value)) return true;
+  const base = value.split(/[\/\\]/).pop() ?? "";
+  return /^(id_|.*\.(pem|key|p12|pfx))$/i.test(base);
+}
+
 export function findCandidates(text: string): Candidate[] {
   if (!text.trim()) return [];
   const reserved: Array<{ start: number; end: number }> = findRefs(text).map((r) => ({
@@ -156,9 +219,13 @@ export function findCandidates(text: string): Candidate[] {
   // J: the deny list applies ONLY to entropy candidates. A key that says `token=` is evidence
   // of intent; a bare hex blob is not. So a legacy 40-hex PAT behind `token=` is captured, not
   // dropped for resembling a git SHA.
-  const base = dedupe(found).filter(
-    (c) => !overlaps(c) && (c.confidence === "entropy" ? !DENY_RE.test(c.value) : true),
-  );
+  const base = dedupe(found).filter((c) => {
+    if (overlaps(c)) return false;
+    if (c.confidence === "entropy" && DENY_RE.test(c.value)) return false;
+    if (isPathValue(c.value)) return false; // O: private-key paths are not secrets to capture here
+    if (isUrlKeyed(c) && !isCredentialUrl(c.value)) return false; // N: plain links behind url-keys
+    return true;
+  });
 
   // Bare high-entropy fallback.
   // B: find EVERY occurrence of the token, not just the first (text.indexOf returns only
@@ -166,12 +233,31 @@ export function findCandidates(text: string): Candidate[] {
   // wider non-entropy candidates only, so a token appearing twice yields two candidates
   // and applyCapture replaces both.
   const kept: Candidate[] = [...base];
-  for (const token of new Set(text.split(/[\s,"'()[\]{}<>=;]+/))) {
-    if (!token) continue;
-    if (DENY_RE.test(token) || /^(?:https?|file|git|ssh|node):/i.test(token)) continue;
-    if (token.includes("/")) continue;
+  for (const raw of new Set(text.split(/[\s,"'()[\]{}<>=;]+/))) {
+    if (!raw) continue;
+    if (DENY_RE.test(raw) || /^(?:https?|file|git|ssh|node):/i.test(raw)) continue;
+    // L: re-attach base64 padding the split set stripped. The split set includes `=`, so
+    // `dXNlcjpwYXNzd29yZDEyMw==` reached this loop as `dXNlcjpwYXNzd29yZDEyMw` (22 chars — not a
+    // multiple of 4, not decodable, a corrupt vault copy). Pad is accepted only when <= 2; a
+    // `len % 4 === 1` residue (pad 3) is not valid base64 at all and is left unpadded. An UNBOUNDED
+    // `=` run is the corruption in the opposite direction, so we require EXACTLY `pad` `=` followed
+    // by a delimiter/end: `key=dXNlcg=x=y` must keep capturing `dXNlcg=x=y` (shell assigns `a=b`),
+    // which it does via the KV path below.
+    const token = reattachBase64Padding(text, raw);
+    // M: replace the old `token.includes("/")` ban (which also banned the base64 alphabet: random
+    // bytes average >1 `/` per 22 chars) with a shape test. Reject only a token that STARTS with a
+    // scheme or looks like a filesystem path; a bare base64 blob (`CzBVep/E6RM...`) starts with
+    // neither, so it is no longer lost.
+    if (/^[a-z][a-z0-9+.-]*:\/\//.test(token) || /^(?:\.\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(token)) continue;
     if (base.some((c) => token.includes(c.value))) continue;
-    if (!looksCredentialish(token) || shannonEntropy(token) <= 3.9) continue;
+    const ent = shannonEntropy(token);
+    // A token that is valid base64 (standard or url-safe alphabet) is a credential candidate on its
+    // entropy alone — looksCredentialish's own `/^[A-Za-z0-9._/-]+$/ && includes("/") rule rejects
+    // base64-with-slash, so without this bypass the entropy fallback would still miss every real
+    // blob. scrub.ts is out of scope for this task, so the bypass lives here.
+    const base64ish = /^[A-Za-z0-9+/]+=*$/.test(token) || /^[A-Za-z0-9_-]+=?$/.test(token);
+    if (token.length < 20 || ent <= 3.9) continue;
+    if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) continue;
     let idx = text.indexOf(token);
     while (idx !== -1) {
       const cand: Candidate = {
@@ -210,13 +296,30 @@ function windowContext(context: string, c: Candidate): string {
   return context.slice(start, end);
 }
 
-export function suggestName(candidate: Candidate, context: string, taken: string[]): string {
+// Q: this single-candidate helper is exported ONLY under a test-only name. `suggestNames` is the
+// public batch API; a caller that reaches for the singular helper (the shape that caused Task 6's
+// requirement E) could re-introduce the wrong-credential path. Task 10 wiring must use `suggestNames`.
+export function suggestNameForTest(candidate: Candidate, context: string, taken: string[]): string {
   // D: name from the candidate's neighborhood, not the whole message. A multi-secret line
   // must not let a later token steer an earlier one's name (e.g. `gh: <ghp_...>  aws: <AKIA>`
   // must not name the GitHub token `gh_aws`). Window +/-60 chars around the candidate.
   const lower = windowContext(context, candidate).toLowerCase();
-  const present = CONTEXT_WORDS.filter((w) => lower.includes(w)).map((w) => ALIAS[w] ?? slug(w));
-  const hint = candidate.hint ? ALIAS[candidate.hint] ?? slug(candidate.hint).split("_")[0] ?? "" : "";
+  // R: prefer the full key hint (not just its first `_`-segment), and suppress context words the
+  // hint already represents. e.g. key `DATABASE_URL` / `database_db` already says "database"/"db",
+  // so a neighbouring `database`/`db` must not be appended again — that double-counting produced
+  // names like `database_db_db`. The suppression is alias-aware (`db` is the alias of `database`),
+  // so a hostname such as `db.internal` in the value does not re-introduce a `db` token either.
+  const hintSlug = candidate.hint ? (ALIAS[candidate.hint] ?? slug(candidate.hint)) : "";
+  const hintAlias = new Set<string>();
+  for (const t of hintSlug ? hintSlug.split("_") : []) {
+    hintAlias.add(t);
+    hintAlias.add(ALIAS[t] ?? t);
+  }
+  const present = CONTEXT_WORDS
+    .filter((w) => lower.includes(w))
+    .map((w) => ALIAS[w] ?? slug(w))
+    .filter((p) => !hintAlias.has(p) && !hintAlias.has(ALIAS[p] ?? p));
+  const hint = hintSlug;
   const parts = [hint && !present.some((p) => p.startsWith(hint) || hint.startsWith(p)) ? hint : undefined, ...present.slice(0, 2)].filter(
     (p): p is string => Boolean(p),
   );
@@ -308,12 +411,12 @@ export function suggestNames(
 
     // Clamp the naming context at the neighbours' spans. ctx is the absolute slice
     // [prevEnd, ownEnd) (or [prevEnd, text.length) for the last candidate); `rel` carries the
-    // candidate's offsets relative to that slice so suggestName's +/-60 window stays inside it.
+    // candidate's offsets relative to that slice so suggestNameForTest's +/-60 window stays inside it.
     const prevEnd = k > 0 ? ordered[k - 1]!.c.end : 0;
     const ctxEnd = k < ordered.length - 1 ? c.end : text.length;
     const ctx = text.slice(prevEnd, ctxEnd);
     const rel: Candidate = { ...c, start: c.start - prevEnd, end: c.end - prevEnd };
-    const name = suggestName(rel, ctx, [...taken]);
+    const name = suggestNameForTest(rel, ctx, [...taken]);
     valueName.set(c.value, name);
     taken.add(name);
   }
@@ -356,20 +459,40 @@ export interface CapturedItem {
  * candidate's stored `value` (e.g. the candidate was captured against an earlier text version and
  * the buffer moved), the candidate is SKIPPED — never rewritten into the output under a possibly
  * wrong name. A silent rewrite here is the root cause of the wrong-credential delivery path.
+ *
+ * P: a vault name must bind exactly one value. `CapturedItem[]` is an exported interface a caller
+ * can hand-build, so a list that assigns one name to two distinct values re-opens the exact
+ * wrong-credential path `suggestNames` documents closing. We assert pairwise (name → value)
+ * consistency up front and SKIP the violating items rather than writing one name for two
+ * credentials. Skips are counted (see `skipped`) so a receipt cannot overstate what was protected
+ * by counting `items.length` — measured: two items with one stale span yield `captured.length === 1`.
  */
 export function applyCapture(
   text: string,
   items: CapturedItem[],
-): { text: string; captured: CapturedItem[] } {
+): { text: string; captured: CapturedItem[]; skipped: number } {
   const captured: CapturedItem[] = [];
+  let skipped = 0;
   let out = "";
   let cursor = 0;
-  for (const { candidate: c, name } of [...items].sort((a, b) => a.candidate.start - b.candidate.start)) {
-    if (c.start < cursor) continue; // overlapping / already-covered span
-    if (text.slice(c.start, c.end) !== c.value) continue; // H: fail closed on span mismatch
+  const sorted = [...items].sort((a, b) => a.candidate.start - b.candidate.start);
+  // P: bind each name to exactly one value; a name already bound to a different value is a conflict
+  // and the later (start-order) item carrying it is skipped.
+  const nameToValue = new Map<string, string>();
+  const skip = new Set<CapturedItem>();
+  for (const item of sorted) {
+    const prev = nameToValue.get(item.name);
+    if (prev !== undefined && prev !== item.candidate.value) skip.add(item);
+    else nameToValue.set(item.name, item.candidate.value);
+  }
+  for (const item of sorted) {
+    if (skip.has(item)) { skipped++; continue; }
+    const { candidate: c, name } = item;
+    if (c.start < cursor) { skipped++; continue; } // overlapping / already-covered span
+    if (text.slice(c.start, c.end) !== c.value) { skipped++; continue; } // H: fail closed on span mismatch
     out += text.slice(cursor, c.start) + `{{sec:${name}}}`;
     cursor = c.end;
     captured.push({ candidate: c, name });
   }
-  return { text: out + text.slice(cursor), captured };
+  return { text: out + text.slice(cursor), captured, skipped };
 }
