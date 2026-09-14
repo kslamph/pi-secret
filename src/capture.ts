@@ -267,25 +267,44 @@ export function suggestNames(
     valueGroups.set(o.c.value, arr);
   }
 
-  // I: resolve every reused vault name FIRST, validate it, and seed `taken` with ALL reused
-  // names before generating anything. A reused name that is invalid (isValidName fails, e.g.
-  // "Bad Name!") is discarded and regenerated — never passed through to a vault write that
-  // would throw far from its cause. Aliases share one name, so a value group resolves to a
-  // single name.
-  const valueName = new Map<string, string>();
-  for (const [value] of valueGroups) {
-    const existing = existingNameForValue?.(value);
-    if (existing !== undefined && isValidName(existing)) {
-      valueName.set(value, existing);
-      taken.add(existing);
-    }
+  // Distinct values in start order (first occurrence of each value).
+  const valuesInOrder: string[] = [];
+  for (const o of ordered) {
+    if (!valuesInOrder.includes(o.c.value)) valuesInOrder.push(o.c.value);
   }
 
-  // Generate for distinct values that have no valid reused name, in start order so a name already
+  // I: resolve the caller's reuse requests. A reused name that is invalid (isValidName fails,
+  // e.g. "Bad Name!") is discarded and regenerated. K: when the caller maps SEVERAL DISTINCT
+  // values to the SAME reused name (existingNameForValue -> "same" for all 40), that request is
+  // unsatisfiable — two different secrets cannot share one vault name. Degrade it: keep the name
+  // for the first value (start order) and drop the reuse for the rest, so they are generated as
+  // distinct valid names instead of throwing and costing the user their message. The caller's
+  // reuse keeps priority over generated names (seeded into `taken` first), matching requirement I.
+  const desiredReuse = new Map<string, string>(); // value -> valid reused name (pre-collision)
+  for (const value of valuesInOrder) {
+    const existing = existingNameForValue?.(value);
+    if (existing !== undefined && isValidName(existing)) desiredReuse.set(value, existing);
+  }
+
+  // Keep a reused name for the first (start-order) value that requests it; degrade later collisions.
+  const reuseOwner = new Map<string, string>(); // reusedName -> owning value
+  const valueName = new Map<string, string>(); // value -> resolved name
+  for (const value of valuesInOrder) {
+    const name = desiredReuse.get(value);
+    if (name === undefined) continue;
+    if (!reuseOwner.has(name)) {
+      reuseOwner.set(name, value);
+      valueName.set(value, name);
+      taken.add(name); // seed before generation so generated names avoid the caller's reuse
+    }
+    // else: a distinct value already owns this reused name -> degrade (drop reuse, generate later)
+  }
+
+  // Generate for distinct values without a kept reused name, in start order so a name already
   // chosen for an earlier candidate is in `taken` before a later one is generated.
   for (let k = 0; k < ordered.length; k++) {
     const { c, i } = ordered[k]!;
-    if (valueName.has(c.value)) continue; // already resolved (reused or an earlier alias)
+    if (valueName.has(c.value)) continue; // already resolved (kept reuse or earlier alias)
 
     // Clamp the naming context at the neighbours' spans. ctx is the absolute slice
     // [prevEnd, ownEnd) (or [prevEnd, text.length) for the last candidate); `rel` carries the
@@ -299,10 +318,9 @@ export function suggestNames(
     taken.add(name);
   }
 
-  // I: final assertion — names bound to DISTINCT values must be pairwise distinct. If two distinct
-  // values map to the SAME reused name (a reused name is seeded into `taken`, so generation avoids
-  // it, but two distinct values could each resolve to the same reused name), that is exactly the
-  // wrong-credential delivery path. Surface it instead of silently collapsing.
+  // I/K invariant: a name must never bind two DISTINCT values. The module's own generation avoids
+  // `taken` (every kept reuse name is seeded into it before generation), so a remaining collision
+  // is a genuine internal bug the caller could not have caused — surface it rather than collapse.
   const nameToValue = new Map<string, string>();
   for (const [value, name] of valueName) {
     const prev = nameToValue.get(name);

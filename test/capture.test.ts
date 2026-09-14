@@ -435,12 +435,51 @@ describe("round 4 — wrong-credential guards (Requirements H and I)", () => {
     expect(names).toEqual(["saved", "saved"]);
   });
 
-  // I: final assertion — two DISTINCT values must not share a reused name.
-  it("I: asserts when two distinct values would share a reused name", () => {
+  // I: an unsatisfiable reuse request must DEGRADE (K), not throw and cost the user their message.
+  it("I/K: two distinct values mapped to one reused name degrade to distinct names (no throw)", () => {
     const A = "Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4";
     const B = "Qw8$Zp3mK2xL9vB4nC7jR6fD1hS5tY";
     const text = `here ${A} and ${B}`;
     const cs = findCandidates(text);
-    expect(() => suggestNames(cs, text, { existingNameForValue: () => "secret" })).toThrow();
+    const names = suggestNames(cs, text, { existingNameForValue: () => "secret" });
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2); // degraded to distinct, no throw
+    expect(names.filter((n) => n === "secret").length).toBe(1); // caller's name kept for one
+    for (const n of names) expect(isValidName(n)).toBe(true);
+  });
+});
+
+// ===== Round 5: Requirement K — degrade unsatisfiable reuse instead of throwing =====
+describe("round 5 — K: degrade unsatisfiable reuse (no throw, caller reuse still honored)", () => {
+  // 40 distinct candidates, every one reusing the same vault name "same". The old code threw;
+  // K degrades: keep "same" for one, generate 39 distinct valid names. No exception, the user
+  // keeps their message.
+  const mkCandidates = (n: number): Candidate[] =>
+    Array.from({ length: n }, (_, i) => {
+      const value = `Tk${String(i).padStart(3, "0")}#mP9qWw8$Xy5zB3nVc7Rf1Jh4ok${i}`;
+      return { value, start: i * 40, end: i * 40 + value.length, confidence: "entropy", hint: "" };
+    });
+
+  it("40 distinct candidates all reusing one name degrade to 40 distinct valid names (no throw)", () => {
+    const cs = mkCandidates(40);
+    const names = suggestNames(cs, "", { existingNameForValue: () => "same" });
+    expect(names).toHaveLength(40);
+    expect(new Set(names).size).toBe(40); // pairwise distinct
+    for (const n of names) expect(isValidName(n)).toBe(true);
+    // K degradation keeps the caller's name for exactly one candidate; the rest are generated.
+    expect(names.filter((n) => n === "same").length).toBe(1);
+  });
+
+  // Cannot pass K by ignoring existingNameForValue — a satisfiable reuse must still be honored.
+  it("a satisfiable reuse (distinct values, distinct reused names) is still honored", () => {
+    const A = "Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4";
+    const B = "Qw8$Zp3mK2xL9vB4nC7jR6fD1hS5tY";
+    const text = `here ${A} and ${B}`;
+    const cs = findCandidates(text);
+    const names = suggestNames(cs, text, {
+      existingNameForValue: (v) => (v === A ? "a_name" : "b_name"),
+    });
+    expect(names.filter((n) => n === "a_name").length).toBe(cs.filter((c) => c.value === A).length);
+    expect(names.filter((n) => n === "b_name").length).toBe(cs.filter((c) => c.value === B).length);
   });
 });
