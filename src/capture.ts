@@ -28,12 +28,18 @@ const ANCHORED: Array<{ re: RegExp; hint: string }> = [
 
 const JWT_RE = /eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{8,}/g;
 const PEM_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
-// A: value class is `[^\s"'<>]{8,}` — it deliberately ALLOWS `&` and `\` to match
-// Task 5's scrub class. Excluding them produced a partial capture: `password=Tr0ub4dor&xyz`
-// masked up to the `&` and leaked the rest in the clear after the head was rewritten to a
-// ref. Over-masking a URL-ish tail costs nothing; under-masking a password costs the design.
-const KV_RE =
-  /([A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key)[A-Za-z0-9_\-]*)["']?\s*[=:]\s*["']?([^\s"'<>]{8,})/gi;
+// A: KV value classes. The BARE form (below) stops at whitespace and quotes and
+// deliberately ALLOWS `&` and `\` to match Task 5's scrub class; excluding them leaked a tail
+// in the clear. C: the QUOTED forms capture the interior of `="..."` / `='...'` whole
+// (whitespace included) to the matching closing quote. A quoted value is NOT extended by A
+// (the interior is already whole); an UNCLOSED quote matches neither form and yields no
+// candidate.
+const KV_BARE_RE =
+  /([A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key)[A-Za-z0-9_\-]*)["']?\s*[=:]\s*([^\s"'<>]{8,})/gi;
+const KV_DQUOTE_RE =
+  /([A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key)[A-Za-z0-9_\-]*)["']?\s*[=:]\s*"([^"]{8,}?)"/gi;
+const KV_SQUOTE_RE =
+  /([A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key)[A-Za-z0-9_\-]*)["']?\s*[=:]\s*'([^']{8,}?)'/gi;
 
 const DENY_RE =
   /^[0-9a-f]{7}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,7 +51,12 @@ function collect(text: string, re: RegExp, confidence: Confidence, hint?: string
   while ((m = re.exec(text))) {
     const value = confidence === "kv" ? (m[2] as string) : (m[0] as string);
     const full = m[0] as string;
-    const start = m.index + (full.length - value.length);
+    // Locate the value within the full match rather than assuming it is the trailing
+    // token: the QUOTED KV regexes have a closing quote AFTER the value, so
+    // (full.length - value.length) would over-count by the delimiter's length and shift
+    // the start past the value. indexOf finds the real offset (skipping the opening quote).
+    const valIdx = full.indexOf(value);
+    const start = m.index + valIdx;
     out.push({ value, start, end: start + value.length, confidence, hint: hint ?? m[1] });
   }
   return out;
@@ -104,7 +115,12 @@ export function findCandidates(text: string): Candidate[] {
   found.push(...collect(text, PEM_RE, "anchored", "private_key"));
   // A: extend KV candidates to the full whitespace-free token so a match can never end
   // inside a credential (see extendKvToToken for the over-capture rationale).
-  found.push(...collect(text, KV_RE, "kv").map((c) => extendKvToToken(c, text)));
+  // A: extend BARE KV candidates to the full whitespace-free token (see extendKvToToken).
+  // C: quoted KV candidates keep their whole interior (whitespace included) and are NOT
+  // extended — the matching closing quote is already the correct boundary.
+  found.push(...collect(text, KV_BARE_RE, "kv").map((c) => extendKvToToken(c, text)));
+  found.push(...collect(text, KV_DQUOTE_RE, "kv"));
+  found.push(...collect(text, KV_SQUOTE_RE, "kv"));
 
   const base = dedupe(found).filter((c) => !overlaps(c) && !DENY_RE.test(c.value));
 
@@ -150,8 +166,19 @@ function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
+/** D: the text within +/-60 chars of the candidate — names derive from the neighborhood. */
+function windowContext(context: string, c: Candidate): string {
+  if (c.start < 0 || c.start > context.length) return context;
+  const start = Math.max(0, c.start - 60);
+  const end = Math.min(context.length, c.end + 60);
+  return context.slice(start, end);
+}
+
 export function suggestName(candidate: Candidate, context: string, taken: string[]): string {
-  const lower = context.toLowerCase();
+  // D: name from the candidate's neighborhood, not the whole message. A multi-secret line
+  // must not let a later token steer an earlier one's name (e.g. `gh: <ghp_...>  aws: <AKIA>`
+  // must not name the GitHub token `gh_aws`). Window +/-60 chars around the candidate.
+  const lower = windowContext(context, candidate).toLowerCase();
   const present = CONTEXT_WORDS.filter((w) => lower.includes(w)).map((w) => ALIAS[w] ?? slug(w));
   const hint = candidate.hint ? ALIAS[candidate.hint] ?? slug(candidate.hint).split("_")[0] ?? "" : "";
   const parts = [hint && !present.some((p) => p.startsWith(hint) || hint.startsWith(p)) ? hint : undefined, ...present.slice(0, 2)].filter(

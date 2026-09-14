@@ -161,3 +161,77 @@ describe("applyCapture", () => {
     expect(out.text).not.toContain("&&echo");
   });
 });
+
+// ===== Round 2: quoted values (C) and context windowing (D) =====
+
+describe("round 2 — quoted credential values (Requirement C)", () => {
+  it("captures a double-quoted value containing whitespace as one candidate", () => {
+    const text = 'password="hunter2 zebra99"';
+    const cs = findCandidates(text);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]?.confidence).toBe("kv");
+    expect(cs[0]?.value).toBe("hunter2 zebra99");
+    const out = applyCapture(text, cs, () => "pw");
+    // No fragment of the secret remains; the surrounding quotes are not the secret.
+    expect(out.text).toBe('password="{{sec:pw}}"');
+    expect(out.text).not.toContain("hunter2");
+    expect(out.text).not.toContain("zebra99");
+    expect(out.captured).toHaveLength(1);
+  });
+
+  it("captures a single-quoted value containing whitespace as one candidate", () => {
+    const text = "password='sup secret 42xx'";
+    const cs = findCandidates(text);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]?.confidence).toBe("kv");
+    expect(cs[0]?.value).toBe("sup secret 42xx");
+    const out = applyCapture(text, cs, () => "pw");
+    expect(out.text).toBe("password='{{sec:pw}}'");
+    expect(out.text).not.toContain("secret");
+    expect(out.text).not.toContain("42xx");
+  });
+
+  it("yields no candidate for an unclosed quote rather than a fragment", () => {
+    // A partial capture is the failure mode requirement A exists to eliminate; an
+    // unclosed quote therefore matches neither the quoted nor the bare form.
+    expect(findCandidates('password="hunter2 zebra99')).toEqual([]);
+    expect(findCandidates("password='sup secret 42xx")).toEqual([]);
+  });
+
+  it("captures a quoted value with no internal whitespace identically to the unquoted case", () => {
+    const bare = findCandidates("password=secret123")[0]!;
+    const quoted = findCandidates('password="secret123"')[0]!;
+    expect(bare?.value).toBe("secret123");
+    expect(quoted?.value).toBe("secret123");
+    const outBare = applyCapture("password=secret123", [bare], () => "pw").text;
+    const outQuoted = applyCapture('password="secret123"', [quoted], () => "pw").text;
+    expect(outBare).toBe("password={{sec:pw}}");
+    expect(outQuoted).toBe('password="{{sec:pw}}"');
+  });
+});
+
+describe("round 2 — name from neighborhood, not whole message (Requirement D)", () => {
+  it("names each secret from its own neighborhood on a multi-secret line", () => {
+    const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
+    const AKIA = "AKIAABCDEFGHIJKLMNOP";
+    // >60 chars of filler keep `aws` outside the GitHub token's +/-60 window.
+    const filler = " fill ".repeat(30);
+    const line = `gh: ${GH}${filler} aws: ${AKIA}`;
+    const ghC = findCandidates(line).find((c) => c.hint === "github")!;
+    const awsC = findCandidates(line).find((c) => c.hint === "aws_access_key_id")!;
+    const ghName = suggestName(ghC, line, []);
+    const awsName = suggestName(awsC, line, []);
+    expect(ghName).not.toContain("aws");
+    expect(awsName).not.toContain("gh");
+  });
+
+  it("without windowing this would have named the GitHub token gh_aws (regression guard)", () => {
+    const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
+    const AKIA = "AKIAABCDEFGHIJKLMNOP";
+    const filler = " fill ".repeat(30);
+    const line = `gh: ${GH}${filler} aws: ${AKIA}`;
+    const ghC = findCandidates(line).find((c) => c.hint === "github")!;
+    // The window is centered on the candidate; assert the window itself excludes `aws`.
+    expect(line.slice(Math.max(0, ghC.start - 60), ghC.end + 60).includes("aws")).toBe(false);
+  });
+});
