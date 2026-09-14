@@ -191,6 +191,64 @@ export function suggestName(candidate: Candidate, context: string, taken: string
   return name;
 }
 
+/**
+ * Batch naming. One name per candidate, in candidate order, pairwise distinct BY CONSTRUCTION
+ * — the caller passes no `taken` and gets no duplicate names. This closes the wrong-credential
+ * delivery path: a naive per-candidate `suggestName` with a fresh `taken` named two different
+ * secrets `secret`, so `applyCapture` emitted `{{sec:secret}}` twice and `Vault.add` (a UI-
+ * confirmed upsert, correct for `/sec add`) silently re-pointed that name at the second value.
+ *
+ * E: the naming context for candidate `i` is clamped at the neighbouring candidates' spans. A
+ * candidate owns the text from the end of the previous candidate up to its OWN end (the last
+ * candidate, having no follower, owns the rest of the text). This is deliberate: a fixed radius
+ * (the old +/-60) leaks an adjacent secret's label — `gh: <ghp>  aws: <AKIA>`, only six chars
+ * apart, still produced `gh_aws` — because adjacent secrets in one paste ARE the realistic
+ * capture input, so only neighbour boundaries separate them. Clamping at `nextStart` instead of
+ * `ownEnd` would keep the neighbour's label inside this window, so the right boundary stops at
+ * the candidate's own span.
+ *
+ * F: when `existingNameForValue` returns a name for a candidate's value, it is reused unchanged
+ * and consumes no counter — spec §4's idempotence rule. Two pastes of one token -> one name;
+ * two different tokens -> never one name.
+ */
+export function suggestNames(
+  candidates: Candidate[],
+  text: string,
+  opts?: { taken?: string[]; existingNameForValue?: (value: string) => string | undefined },
+): string[] {
+  const seedTaken = opts?.taken ?? [];
+  const existingNameForValue = opts?.existingNameForValue;
+  // Process in start order so neighbour spans are well defined and so a name already chosen for
+  // an earlier candidate is in `taken` before a later one is generated.
+  const ordered = [...candidates].map((c, i) => ({ c, i })).sort((a, b) => a.c.start - b.c.start);
+  const taken = new Set(seedTaken);
+  const names = new Array<string>(candidates.length);
+
+  for (let k = 0; k < ordered.length; k++) {
+    const { c, i } = ordered[k]!;
+
+    // F: an already-known value keeps its vault name, unchanged, and does not consume a counter.
+    const existing = existingNameForValue?.(c.value);
+    if (existing !== undefined) {
+      names[i] = existing;
+      taken.add(existing);
+      continue;
+    }
+
+    // Clamp the naming context at the neighbours' spans. ctx is the absolute slice
+    // [prevEnd, ownEnd) (or [prevEnd, text.length) for the last candidate); `rel` carries the
+    // candidate's offsets relative to that slice so suggestName's +/-60 window stays inside it.
+    const prevEnd = k > 0 ? ordered[k - 1]!.c.end : 0;
+    const ctxEnd = k < ordered.length - 1 ? c.end : text.length;
+    const ctx = text.slice(prevEnd, ctxEnd);
+    const rel: Candidate = { ...c, start: c.start - prevEnd, end: c.end - prevEnd };
+    const name = suggestName(rel, ctx, [...taken]);
+    names[i] = name;
+    taken.add(name);
+  }
+  return names;
+}
+
 export function applyCapture(
   text: string,
   candidates: Candidate[],

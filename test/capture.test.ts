@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyCapture, findCandidates, suggestName } from "../src/capture.ts";
+import { applyCapture, findCandidates, suggestName, suggestNames } from "../src/capture.ts";
 import { isValidName } from "../src/refs.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 const SHA = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
+const AKIA = "AKIAABCDEFGHIJKLMNOP";
 
 describe("findCandidates", () => {
   it("detects an anchored prefix token in prose", () => {
@@ -233,5 +234,61 @@ describe("round 2 — name from neighborhood, not whole message (Requirement D)"
     const ghC = findCandidates(line).find((c) => c.hint === "github")!;
     // The window is centered on the candidate; assert the window itself excludes `aws`.
     expect(line.slice(Math.max(0, ghC.start - 60), ghC.end + 60).includes("aws")).toBe(false);
+  });
+});
+
+// ===== Round 3: batch naming — distinct by construction (E) and idempotence (F) =====
+
+describe("round 3 — batch naming (Requirements E and F)", () => {
+  const A = "Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4"; // distinct 28-char high-entropy bare token
+  const B = "Qw8$Zp3mK2xL9vB4nC7jR6fD1hS5tY"; // distinct 28-char high-entropy bare token
+
+  it("gives two distinct bare secrets distinct names with no caller threading of taken", () => {
+    const text = `here you go: ${A} and ${B}`;
+    const cs = findCandidates(text);
+    expect(cs.length).toBe(2);
+    const names = suggestNames(cs, text); // caller passes no `taken`
+    expect(names).toHaveLength(2);
+    expect(new Set(names).size).toBe(2); // the dup-name footgun: both want "secret"
+    expect(names[0]).not.toBe(names[1]);
+  });
+
+  it("names adjacent secrets without leaking the neighbour's keyword", () => {
+    // No filler: the two secrets sit 6 chars apart, exactly the realistic paste shape.
+    const line = `gh: ${GH}  aws: ${AKIA}`;
+    const cs = findCandidates(line);
+    const names = suggestNames(cs, line);
+    const ghIdx = cs.findIndex((c) => c.hint === "github");
+    expect(ghIdx).toBeGreaterThanOrEqual(0);
+    expect(names[ghIdx]).not.toContain("aws");
+  });
+
+  it("reuses a known value's vault name unchanged (F)", () => {
+    const text = `token is ${GH}`;
+    const cs = findCandidates(text);
+    const names = suggestNames(cs, text, {
+      existingNameForValue: (v) => (v === GH ? "gh_my_existing" : undefined),
+    });
+    expect(names[0]).toBe("gh_my_existing");
+  });
+
+  it("gives five mixed candidates five pairwise-distinct valid names", () => {
+    const text = `${GH} and aws ${AKIA} also db_password=Tr0ub4dor3xyzabcQ and ${A} finally ${B}`;
+    const cs = findCandidates(text);
+    const names = suggestNames(cs, text);
+    expect(names).toHaveLength(cs.length);
+    expect(new Set(names).size).toBe(cs.length);
+    for (const n of names) expect(isValidName(n)).toBe(true);
+  });
+
+  it("emits distinct refs in applyCapture when values differ (the missing assertion)", () => {
+    const text = `here you go: ${A} and ${B}`;
+    const cs = findCandidates(text);
+    const names = suggestNames(cs, text);
+    const nameOf = new Map(cs.map((c, idx) => [c, names[idx]!]));
+    const out = applyCapture(text, cs, (c) => nameOf.get(c)!);
+    const refs = [...out.text.matchAll(/\{\{sec:([a-z][a-z0-9_-]{0,63})\}\}/g)].map((m) => m[1]!);
+    expect(new Set(refs).size).toBe(2);
+    expect(out.captured).toHaveLength(2);
   });
 });
