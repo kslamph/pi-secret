@@ -86,6 +86,18 @@ describe("maskValues", () => {
     expect(out.text).toBe("{{sec:redacted}}");
   });
 
+  it("still masks CRLF-wrapped base64 (Req 17 pin)", () => {
+    // A pin, not a regression test: MIME and Windows checkouts produce CRLF folds,
+    // and this must pass immediately. It documents that the shared whitespace class
+    // covers `\r\n` so the index map and the stripped buffer agree on CRLF.
+    const b64 = Buffer.from(GH).toString("base64");
+    const wrapped = b64.slice(0, 50) + "\r\n" + b64.slice(50);
+    const out = maskValues(wrapped, [GH]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+    expect(out.text).not.toContain("\r");
+  });
+
   it("masks standard base64 with padding stripped (base64 -w0 | tr -d '=')", () => {
     // Req 14: derivedForms emits padded-standard base64 and base64url, but NOT the
     // standard-alphabet form with padding stripped -- the output of `base64 -w0 | tr -d '='`.

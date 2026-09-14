@@ -10,8 +10,16 @@ export interface ScrubOptions {
   shapes?: boolean;
 }
 
+/** Result of a scrub pass over a string. */
 export interface ScrubResult {
   text: string;
+  /**
+   * Number of masked *regions* replaced, NOT the count of distinct secrets redacted.
+   * Two encodings of the same vault secret at separate offsets count as 2; a raw
+   * value plus one of its encodings landing on the same span count as 1 (the batch
+   * dedup keeps only the longest winning span). Task 8 receipts must not read this
+   * field as "N secrets redacted" — it is `maskedSpanCount`.
+   */
   hits: number;
 }
 
@@ -85,7 +93,16 @@ const DENY_SOURCES = [
 const DENY_ANCHORED = new RegExp(`^(?:${DENY_SOURCES.join("|")})$`, "i");
 
 const SHAPE_RE = new RegExp(`(?:${PEM_RE}|${JWT_RE}|${PREFIX_RE}|${KV_RE})`, "gi");
-const WHITESPACE_RE = /[ \t\n\r\f\v]/g;
+
+/**
+ * Single source of truth for the whitespace set (Req 17). `stripWhitespace` and
+ * `buildOrigPos` both derive from `WS`, so a future "cleanup" to `/\s+/` on one side
+ * cannot silently shift offsets and mask the wrong span — the dangerous failure mode
+ * is a whitespace set that swallows more/less than the index map expects. This is the
+ * exact set `[ \t\n\r\f\v]`; NBSP and U+2028 are deliberately NOT whitespace here.
+ */
+const WS = /[ \t\n\r\f\v]/;
+const WHITESPACE_RE = new RegExp(WS.source, "g");
 
 /** Whole-candidate exemption — see DENY_SOURCES for why this must not overlap-match. */
 function isDenied(candidate: string): boolean {
@@ -118,18 +135,16 @@ function byLengthDesc(a: string, b: string): number {
   return b.length - a.length;
 }
 
-/** A form + the token that replaces it. */
+/**
+ * A form + the token that replaces it. `kind` is inferred from the form's VALUE
+ * (Req 15), never its position in the `derivedForms` array, so a future reorder or
+ * pre-filter of `derivedForms` cannot flip a raw value to an encoding (or vice versa)
+ * and silently reintroduce the Req 12 prose-mangling bug.
+ */
 interface Form {
   form: string;
   token: string;
-  /**
-   * Raw vault value: match CONTIGUOUSLY on the original text (Req 12). An 8-char PIN
-   * like "test1234" must not drag prose such as "test 1234" through the matcher.
-   * Encodings (base64/b64url/hex): match on the whitespace-collapsed buffer (Req 9),
-   * since encodings arriving from `kubectl -o yaml` / MIME wrap / git diff arrive
-   * split across whitespace that is not part of the secret.
-   */
-  raw: boolean;
+  kind: "raw" | "encoding";
 }
 
 interface Span {
@@ -143,21 +158,22 @@ interface Span {
  * contains no whitespace, returns the text itself so callers can skip offset mapping.
  */
 function stripWhitespace(text: string): string {
+  if (!WS.test(text)) return text;
   WHITESPACE_RE.lastIndex = 0;
-  return WHITESPACE_RE.test(text) ? text.replace(WHITESPACE_RE, "") : text;
+  return text.replace(WHITESPACE_RE, "");
 }
 
 /**
  * Original offset of the i-th non-whitespace character. Built LAZILY (Req 13) only
  * when an encoding form actually matches — the common case (secrets absent from a tool
- * result) never pays this cost.
+ * result) never pays this cost. Shares the `WS` class with stripWhitespace (Req 17).
  */
 function buildOrigPos(text: string): number[] {
   const len = text.length;
   const out: number[] = [];
   for (let i = 0; i < len; i++) {
     const ch = text[i]!;
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") continue;
+    if (WS.test(ch)) continue;
     out[out.length] = i;
   }
   return out;
@@ -172,17 +188,17 @@ function maskForms(text: string, forms: Form[]): ScrubResult {
   const noWhitespace = stripped === text;
   let origPos: number[] | null = null;
 
-  // Collect every non-overlapping occurrence, all in ORIGINAL offset space so raw
-  // (text coords) and encoding (stripped coords mapped back) spans coexist.
+  // Collect every occurrence, all in ORIGINAL offset space so raw (text coords) and
+  // encoding (stripped coords mapped back) spans coexist.
   const spans: Span[] = [];
-  for (const { form, token, raw } of forms) {
+  for (const { form, token, kind } of forms) {
     if (form.length < MIN_SCRUBABLE_LENGTH) continue;
-    const search = raw ? text : stripped;
+    const search = kind === "raw" ? text : stripped;
     let idx = search.indexOf(form);
     if (idx === -1) continue;
-    if (!raw && !noWhitespace && origPos === null) origPos = buildOrigPos(text);
+    if (kind === "encoding" && !noWhitespace && origPos === null) origPos = buildOrigPos(text);
     for (;;) {
-      if (raw || noWhitespace) {
+      if (kind === "raw" || noWhitespace) {
         // contiguous: stripped===text so stripped-index == text-index
         spans.push({ start: idx, end: idx + form.length, token });
       } else {
@@ -225,26 +241,29 @@ function collectForms(secrets: readonly string[], tokenFor: (value: string) => s
   for (const value of secrets) {
     if (value.length < MIN_SCRUBABLE_LENGTH) continue;
     const token = tokenFor(value);
-    const derived = derivedForms(value);
-    // Index 0 is the raw value (contiguous, Req 12). Indices 1..3 are encodings
-    // (whitespace-tolerant) — base64, base64url, hex.
-    for (let i = 0; i < derived.length; i++) {
-      const form = derived[i]!;
+    // `form === value` identifies the raw value form by VALUE, not array index (Req 15).
+    for (const form of derivedForms(value)) {
       if (form.length < MIN_SCRUBABLE_LENGTH) continue;
-      forms.push({ form, token, raw: i === 0 });
-      if (i !== 0) {
-        // Req 14: standard base64 with padding stripped — the output of
-        // `base64 -w0 | tr -d '='` — is a distinct encoding. It differs from padded
-        // standard base64 by the trailing `=` and shares the `+`/`/` alphabet
-        // (unlike base64url, which swaps `/`-for-`_`), so neither existing form
-        // catches it. derivedForms[1] is the padded standard base64; emit its
-        // padding-stripped twin. No-op when there is no padding to strip.
-        if (i === 1 && form.endsWith("=")) forms.push({ form: form.replace(/=+$/, ""), token, raw: false });
-        // Req 10: an uppercase hex of a vaulted secret is the same secret on the wire
-        // (…toString('hex').toUpperCase()), but derivedForms yields only lowercase.
-        // Add the uppercase twin for the hex ENCODING only — still a derived form
+      const kind: "raw" | "encoding" = form === value ? "raw" : "encoding";
+      forms.push({ form, token, kind });
+      if (kind === "encoding") {
+        // Req 14: standard base64 with padding stripped (`base64 -w0 | tr -d '='`).
+        // Among encodings only padded standard base64 ends with `=`, so this is
+        // index-free and survives a derivedForms reorder.
+        if (form.endsWith("=")) {
+          const unpadded = form.replace(/=+$/, "");
+          // Req 16: re-state the MIN invariant here (unreachable today: an 8-byte
+          // value yields >= 11 unpadded base64 chars), so a future encoding whose
+          // padding strip could undercut the floor is caught at the push.
+          if (unpadded.length >= MIN_SCRUBABLE_LENGTH) {
+            forms.push({ form: unpadded, token, kind: "encoding" });
+          }
+        }
+        // Req 10: uppercase hex twin (hex encoding only) — still a derived form
         // keyed to the same name, never an entropy scan of arbitrary hex runs.
-        if (/^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token, raw: false });
+        if (/^[0-9a-f]+$/.test(form)) {
+          forms.push({ form: form.toUpperCase(), token, kind: "encoding" });
+        }
       }
     }
   }
