@@ -86,6 +86,23 @@ describe("maskValues", () => {
     expect(out.text).toBe("{{sec:redacted}}");
   });
 
+  it("masks standard base64 with padding stripped (base64 -w0 | tr -d '=')", () => {
+    // Req 14: derivedForms emits padded-standard base64 and base64url, but NOT the
+    // standard-alphabet form with padding stripped -- the output of `base64 -w0 | tr -d '='`.
+    // Using "ſ".repeat(14) (U+017F, 2 bytes each -> 28 bytes -> base64 ending in `==`) makes
+    // the three encodings pairwise distinct: padded has `==`, unpadded has `/` but no
+    // `==`, base64url has `_`. If they collided the test would be vacuous, so assert
+    // distinctness first -- masking the unpadded line then proves the new twin.
+    const value = "ſ".repeat(14);
+    const padded = Buffer.from(value, "utf8").toString("base64");
+    const b64url = Buffer.from(value, "utf8").toString("base64url");
+    const unpadded = padded.replace(/=+$/, "");
+    expect(new Set([padded, b64url, unpadded]).size).toBe(3);
+    const out = maskValues(unpadded, [value]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
+
   it("scrubs a ~1MB output with 16 entries in bounded time", () => {
     // Req 13 guard: the value pass must build its whitespace-stripped buffer ONCE
     // and index every form against it, not rebuild per form. Generous ceiling with

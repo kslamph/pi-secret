@@ -232,11 +232,20 @@ function collectForms(secrets: readonly string[], tokenFor: (value: string) => s
       const form = derived[i]!;
       if (form.length < MIN_SCRUBABLE_LENGTH) continue;
       forms.push({ form, token, raw: i === 0 });
-      // Req 10: an uppercase hex of a vaulted secret is the same secret on the wire
-      // (`…toString('hex').toUpperCase()`), but derivedForms yields only lowercase.
-      // Add the uppercase twin for the hex ENCODING only — still a derived form
-      // keyed to the same name, never an entropy scan of arbitrary hex runs.
-      if (i !== 0 && /^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token, raw: false });
+      if (i !== 0) {
+        // Req 14: standard base64 with padding stripped — the output of
+        // `base64 -w0 | tr -d '='` — is a distinct encoding. It differs from padded
+        // standard base64 by the trailing `=` and shares the `+`/`/` alphabet
+        // (unlike base64url, which swaps `/`-for-`_`), so neither existing form
+        // catches it. derivedForms[1] is the padded standard base64; emit its
+        // padding-stripped twin. No-op when there is no padding to strip.
+        if (i === 1 && form.endsWith("=")) forms.push({ form: form.replace(/=+$/, ""), token, raw: false });
+        // Req 10: an uppercase hex of a vaulted secret is the same secret on the wire
+        // (…toString('hex').toUpperCase()), but derivedForms yields only lowercase.
+        // Add the uppercase twin for the hex ENCODING only — still a derived form
+        // keyed to the same name, never an entropy scan of arbitrary hex runs.
+        if (/^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token, raw: false });
+      }
     }
   }
   forms.sort((a, b) => byLengthDesc(a.form, b.form));
