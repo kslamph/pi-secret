@@ -422,7 +422,13 @@ executing a command that would send the literal placeholder.
     child environment), and only where the encoding was already going to be visible — but it is a
     confidentiality gap, so it is scheduled ahead of the tasks that consume scrubbing rather than
     documented away.
-12. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
+12. **Capture does not understand quotes escaped *inside* a quoted value.** Measured:
+    `password="ab\"cd\"` yields no candidate, so nothing is captured. This fails safe — no capture
+    means no announcement of protection, and the text behaves as it would without pi-secure — and
+    fixing it needs quote-escaping awareness inside the matcher for one shape. Accepted. Capture's
+    other known non-matches are deliberate: `password=<placeholder>` (angle brackets excluded,
+    because `<your-token-here>` is a template rather than a secret).
+13. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
    raw secrets to a logging endpoint.** This is the largest accepted hole in the design, and
    it is a deliberate trade for file round-trip fidelity (§8.2). Flip the knob if you care
    more about the logger than about editing such files.
