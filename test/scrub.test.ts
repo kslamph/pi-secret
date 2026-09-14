@@ -66,6 +66,42 @@ describe("maskValues", () => {
     expect(out.hits).toBe(1);
     expect(out.text).toBe("{{sec:redacted}}");
   });
+
+  it("does not whitespace-tolerantly match a short raw value split by spaces", () => {
+    // Req 12: an 8-char vault entry must NOT drag ordinary prose through the
+    // whitespace-collapsed matcher — only derived encodings do that.
+    expect(maskValues("I ran test 1234 twice", ["test1234"]).hits).toBe(0);
+  });
+
+  it("does not whitespace-tolerantly match a short raw value split by newlines", () => {
+    const prose = "abc def\nghi jkl\nmno pqr";
+    expect(maskValues(prose, ["abcdefghi"]).hits).toBe(0);
+  });
+
+  it("still masks wrapped base64 (Req 9 must not regress)", () => {
+    const b64 = Buffer.from(GH).toString("base64");
+    const wrapped = b64.slice(0, 50) + "\n" + b64.slice(50);
+    const out = maskValues(wrapped, [GH]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
+
+  it("scrubs a ~1MB output with 16 entries in bounded time", () => {
+    // Req 13 guard: the value pass must build its whitespace-stripped buffer ONCE
+    // and index every form against it, not rebuild per form. Generous ceiling with
+    // headroom below the 84348b4 baseline (~3129ms); timing is reported, not tight.
+    const secrets = Array.from({ length: 16 }, (_, i) => "ghp_" + String(i).padStart(36, "0"));
+    const line = "the quick brown fox jumps over the lazy dog\n";
+    const big = line.repeat(24000); // ~1.08 MB
+    expect(Buffer.byteLength(big, "utf8")).toBeGreaterThan(1_000_000);
+    const start = Date.now();
+    const out = maskValues(big, secrets);
+    const ms = Date.now() - start;
+    expect(out.hits).toBe(0); // secrets absent from the synthetic output
+    expect(ms).toBeLessThan(1000); // 84348b4: ~3129ms; headroom target <1s
+    // eslint-disable-next-line no-console
+    console.log(`[perf] maskValues 1MB / 16 entries = ${ms}ms`);
+  });
 });
 
 describe("maskShapes", () => {

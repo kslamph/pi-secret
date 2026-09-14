@@ -85,6 +85,7 @@ const DENY_SOURCES = [
 const DENY_ANCHORED = new RegExp(`^(?:${DENY_SOURCES.join("|")})$`, "i");
 
 const SHAPE_RE = new RegExp(`(?:${PEM_RE}|${JWT_RE}|${PREFIX_RE}|${KV_RE})`, "gi");
+const WHITESPACE_RE = /[ \t\n\r\f\v]/g;
 
 /** Whole-candidate exemption — see DENY_SOURCES for why this must not overlap-match. */
 function isDenied(candidate: string): boolean {
@@ -117,57 +118,105 @@ function byLengthDesc(a: string, b: string): number {
   return b.length - a.length;
 }
 
+/** A form + the token that replaces it. */
 interface Form {
   form: string;
+  token: string;
+  /**
+   * Raw vault value: match CONTIGUOUSLY on the original text (Req 12). An 8-char PIN
+   * like "test1234" must not drag prose such as "test 1234" through the matcher.
+   * Encodings (base64/b64url/hex): match on the whitespace-collapsed buffer (Req 9),
+   * since encodings arriving from `kubectl -o yaml` / MIME wrap / git diff arrive
+   * split across whitespace that is not part of the secret.
+   */
+  raw: boolean;
+}
+
+interface Span {
+  start: number;
+  end: number;
   token: string;
 }
 
 /**
- * Whitespace map for Req 9: tool output wraps long tokens (MIME 76-col base64,
- * `kubectl -o yaml`, PEM bodies, git diffs of credential files) across
- * newlines/spaces that are NOT part of the secret. We match the form against a
- * whitespace-collapsed copy and map the hit back to the real offsets so the ENTIRE
- * wrapped span — including the inserted whitespace — is replaced, not just the
- * first line.
- *
- * This rebuilds a collapsed view per hit and never builds a `\s*`-interleaved
- * regex from the form: dozens of adjacent optional-whitespace alternations over a
- * long line is how you earn catastrophic backtracking on a path that runs on every
- * tool result.
+ * Whitespace-stripped copy of `text` (the shared scan buffer, Req 13). When the text
+ * contains no whitespace, returns the text itself so callers can skip offset mapping.
  */
-function stripWithIndex(text: string): { stripped: string; origPos: number[] } {
-  const chars: string[] = [];
-  const origPos: number[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") continue;
-    origPos[chars.length] = i;
-    chars.push(ch);
-  }
-  return { stripped: chars.join(""), origPos };
+function stripWhitespace(text: string): string {
+  WHITESPACE_RE.lastIndex = 0;
+  return WHITESPACE_RE.test(text) ? text.replace(WHITESPACE_RE, "") : text;
 }
 
-/** The single matching primitive both maskValues and scrubText share, so the two
- * value passes cannot drift apart and both stay longest-first. */
+/**
+ * Original offset of the i-th non-whitespace character. Built LAZILY (Req 13) only
+ * when an encoding form actually matches — the common case (secrets absent from a tool
+ * result) never pays this cost.
+ */
+function buildOrigPos(text: string): number[] {
+  const len = text.length;
+  const out: number[] = [];
+  for (let i = 0; i < len; i++) {
+    const ch = text[i]!;
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") continue;
+    out[out.length] = i;
+  }
+  return out;
+}
+
+/** The single matching primitive both maskValues and scrubText share. */
 function maskForms(text: string, forms: Form[]): ScrubResult {
   if (!text || forms.length === 0) return { text, hits: 0 };
-  let hits = 0;
-  let out = text;
-  for (const { form, token } of forms) {
+
+  // Req 13: one stripped buffer for the whole text, reused by every encoding form.
+  const stripped = stripWhitespace(text);
+  const noWhitespace = stripped === text;
+  let origPos: number[] | null = null;
+
+  // Collect every non-overlapping occurrence, all in ORIGINAL offset space so raw
+  // (text coords) and encoding (stripped coords mapped back) spans coexist.
+  const spans: Span[] = [];
+  for (const { form, token, raw } of forms) {
     if (form.length < MIN_SCRUBABLE_LENGTH) continue;
+    const search = raw ? text : stripped;
+    let idx = search.indexOf(form);
+    if (idx === -1) continue;
+    if (!raw && !noWhitespace && origPos === null) origPos = buildOrigPos(text);
     for (;;) {
-      const { stripped, origPos } = stripWithIndex(out);
-      const idx = stripped.indexOf(form);
+      if (raw || noWhitespace) {
+        // contiguous: stripped===text so stripped-index == text-index
+        spans.push({ start: idx, end: idx + form.length, token });
+      } else {
+        const start = origPos![idx]!;
+        const end = (origPos![idx + form.length - 1] ?? start) + 1;
+        spans.push({ start, end, token });
+      }
+      idx = search.indexOf(form, idx + form.length);
       if (idx === -1) break;
-      const start = origPos[idx]!;
-      // end is exclusive: one past the last matched char; the span covers any
-      // wrapping whitespace between form characters, which is what we want gone.
-      const end = (origPos[idx + form.length - 1] ?? start) + 1;
-      out = out.slice(0, start) + token + out.slice(end);
-      hits++;
     }
   }
-  return { text: out, hits };
+
+  // Longest span wins on overlap — preserves the old per-form "longest first"
+  // semantics (a containing secret must mask before a contained one).
+  spans.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+  const accepted: Span[] = [];
+  for (const s of spans) {
+    let overlap = false;
+    for (const a of accepted) {
+      if (s.start < a.end && s.end > a.start) {
+        overlap = true;
+        break;
+      }
+    }
+    if (!overlap) accepted.push(s);
+  }
+
+  // Apply right-to-left so earlier spans' offsets stay valid as later ones shrink.
+  accepted.sort((a, b) => b.start - a.start);
+  let out = text;
+  for (const s of accepted) {
+    out = out.slice(0, s.start) + s.token + out.slice(s.end);
+  }
+  return { text: out, hits: accepted.length };
 }
 
 /** Build the candidate form set for a set of secrets, longest form first. */
@@ -176,15 +225,18 @@ function collectForms(secrets: readonly string[], tokenFor: (value: string) => s
   for (const value of secrets) {
     if (value.length < MIN_SCRUBABLE_LENGTH) continue;
     const token = tokenFor(value);
-    for (const form of derivedForms(value)) {
+    const derived = derivedForms(value);
+    // Index 0 is the raw value (contiguous, Req 12). Indices 1..3 are encodings
+    // (whitespace-tolerant) — base64, base64url, hex.
+    for (let i = 0; i < derived.length; i++) {
+      const form = derived[i]!;
       if (form.length < MIN_SCRUBABLE_LENGTH) continue;
-      forms.push({ form, token });
-      // Req 10: an uppercase hex encoding of a vaulted secret is the same secret on
-      // the wire (`…toString('hex').toUpperCase()`), but derivedForms yields only the
-      // lowercase form. Add the uppercase twin — still a derived form, still keyed to
-      // the same name — rather than entropy-scanning arbitrary hex runs, which is
-      // what the brief explicitly forbids.
-      if (/^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token });
+      forms.push({ form, token, raw: i === 0 });
+      // Req 10: an uppercase hex of a vaulted secret is the same secret on the wire
+      // (`…toString('hex').toUpperCase()`), but derivedForms yields only lowercase.
+      // Add the uppercase twin for the hex ENCODING only — still a derived form
+      // keyed to the same name, never an entropy scan of arbitrary hex runs.
+      if (i !== 0 && /^[0-9a-f]+$/.test(form)) forms.push({ form: form.toUpperCase(), token, raw: false });
     }
   }
   forms.sort((a, b) => byLengthDesc(a.form, b.form));
@@ -215,8 +267,8 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
   let hits = 0;
 
   // Name-exact pass first: a vault value masks to its own ref so the model can reuse it.
-  // Shares maskForms with maskValues (Req 9/10) so the two passes have identical
-  // matching semantics — longest-first, whitespace-tolerant, hex-case-agnostic.
+  // Shares maskForms with maskValues (Req 9/10/12/13) so the two passes cannot drift
+  // apart — one buffer, one dedup, one application loop.
   const valueForms = collectForms(vault.values(), (value) => {
     const name = vault.findByValue(value)?.name;
     return name ? `{{sec:${name}}}` : GENERIC;
