@@ -413,7 +413,16 @@ executing a command that would send the literal placeholder.
     brackets starts consuming markup. Encoded forms of vaulted values, including line-wrapped
     base64 (`kubectl get secret -o yaml`, `git diff` of a credential file) and either hex case,
     are covered — round 2 measured three leaks in exactly that area before fixing them.
-11. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
+11. **A truncated encoding is currently not masked — live until Task 16 lands.** `maskForms`
+    requires the whole derived form to appear, so an *encoded* vaulted secret whose base64 is cut by
+    output truncation is left visible: measured, cutting an 88-character encoding at 84 characters
+    exposes 94% of it with zero hits. pi truncates to the **last** 5000 lines / 50KB and can return a
+    partial last line, so the surviving fragment is typically the tail. This applies only to secrets
+    reaching output in *encoded* form (the value itself never appears, since refs keep it in the
+    child environment), and only where the encoding was already going to be visible — but it is a
+    confidentiality gap, so it is scheduled ahead of the tasks that consume scrubbing rather than
+    documented away.
+12. **With `scrubFileReads: false` (the default), `read`/`grep` on a credential file sends
    raw secrets to a logging endpoint.** This is the largest accepted hole in the design, and
    it is a deliberate trade for file round-trip fidelity (§8.2). Flip the knob if you care
    more about the logger than about editing such files.
