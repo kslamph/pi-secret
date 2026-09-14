@@ -7,24 +7,29 @@ export interface BashExpansion {
   missing: string[];
 }
 
-type State = "code" | "sq" | "dq" | "ansq" | "loc";
+export type SpanKind = "sq" | "dq" | "ansq" | "loc" | "comment" | "heredoc" | "arith";
+
+export interface BashLex {
+  /** Lexical spans in source order. A position's context is a single lookup
+   *  against these (plus `unterminated` for the tail). */
+  spans: { kind: SpanKind; start: number; end: number }[];
+  /** Non-null when the scan ends inside a quote/heredoc we cannot close;
+   *  `index` is the opening character. Anything at or after it sits in a
+   *  context the scanner cannot see. */
+  unterminated: { kind: SpanKind; index: number } | null;
+}
 
 interface Interval {
   start: number;
   end: number;
 }
 
-interface QuoteScan {
-  sq: Interval[];
-  dq: Interval[];
-  /** ANSI-C spans: $'…'. Bash does not expand parameters inside, so a ref there
-   *  can only be delivered by the close-and-reopen splice, like a sq ref. */
-  ansq: Interval[];
-  /** Locale spans: $"…". Expands like double quotes. */
-  loc: Interval[];
-  /** Non-null when the scan ends inside a quote; `index` is the opening quote
-   *  character. Anything at or after it sits in quoting we cannot see. */
-  unterminated: { state: State; index: number } | null;
+export interface HeredocRegion {
+  /** Body text between the operator line and the terminator. */
+  start: number;
+  end: number;
+  /** A quoted delimiter ('EOF' / "EOF" / \\EOF) suppresses parameter expansion. */
+  inert: boolean;
 }
 
 /**
@@ -43,201 +48,352 @@ interface QuoteScan {
  */
 const WORD_BOUNDARY = /[( )<>;|&\t\n]/;
 
-export interface HeredocRegion {
-  /** Body text between the operator line and the terminator. */
-  start: number;
-  end: number;
-  /** A quoted delimiter ('EOF' / "EOF" / \\EOF) suppresses parameter expansion. */
-  inert: boolean;
-}
-
-/**
- * Quote spans and lexical context, bash-aware beyond plain quotes:
- *  - Heredoc bodies (both quoted and unquoted delimiters) are skipped entirely:
- *    every quote character inside is literal text, not a delimiter, and no quote
- *    state is carried across the body into the code that follows;
- *  - `#` starts a comment when it starts a word — tracked via a lexer flag
- *    rather than a preceding-character lookup, because `\;` makes the `;`
- *    literal and `( )` are word starts even though they are not in the old
- *    whitespace-only set — and comment text pairs no quotes;
- *  - `$'…'` and `$"…"` are their own spans, closed by the next unescaped
- *    delimiter, so a `"` inside $"…" opens nothing and a `'` inside $'…' closes
- *    only that span;
- *  - An unterminated quote at EOF is reported so `expandBash` can fail-closed.
- */
-function quoteIntervals(text: string, heredocBodies: HeredocRegion[] = []): QuoteScan {
-  const sq: Interval[] = [];
-  const dq: Interval[] = [];
-  const ansq: Interval[] = [];
-  const loc: Interval[] = [];
-  let state: State = "code";
-  let open = -1; // index of the opening quote character
-  /** True when the next code-state character starts a new bash word. */
-  let wordStart = true;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (state === "code") {
-      // Heredoc bodies are literal text: every quote character there is data,
-      // not a delimiter.  Skip to the end of whichever body we are in.  The
-      // terminator line is NOT part of the body region, so it is processed
-      // normally (its characters set wordStart as any other code text would).
-      //
-      // Use find() + outer-loop continue, NOT an inner-loop break: a plain
-      // `break` exits only the inner for, then control falls through and
-      // evaluates the stale `ch` (the body's first character) at the post-jump
-      // index — a body opening with `'` would anchor a phantom sq span. The
-      // `continue` here targets this scan loop, skipping that stale-ch
-      // evaluation entirely. (Verified: changing `break` to `continue` is a
-      // no-op because both target the inner loop — this restructure is
-      // required.)
-      const body = heredocBodies.find((b) => i >= b.start && i < b.end);
-      if (body) {
-        i = body.end - 1; // loop will increment past the last body char
-        wordStart = true; // body ends with \n before the terminator line
-        continue; // req6: never re-process the stale `ch` at the new index
-      }
-      if (ch === "'") {
-        state = "sq";
-        open = i;
-        wordStart = false; // opening quote is word text
-      } else if (ch === '"') {
-        state = "dq";
-        open = i;
-        wordStart = false;
-      } else if (ch === "$" && i + 1 < text.length) {
-        const next = text[i + 1];
-        if (next === "'") {
-          state = "ansq";
-          open = i + 1;
-          i++;
-          wordStart = false;
-        } else if (next === '"') {
-          state = "loc";
-          open = i + 1;
-          i++;
-          wordStart = false;
-        } else if (next === "\\") {
-          i++; // \$ is an escaped dollar — clears wordStart (word text, req 7)
-          wordStart = false;
-        } else {
-          wordStart = false; // $ followed by a regular character
-        }
-      } else if (ch === "\\" && i + 1 < text.length) {
-        i++; // escape pair: \<char> is word text, so it clears wordStart
-             // (req 7 — leaving it inherited lets a later `#` be misread as a
-             //  comment start after a preceding boundary like `)`)
-        wordStart = false;
-      } else if (ch === "#" && wordStart) {
-        // Comment to end of line; the newline itself stays in code state.
-        const nl = text.indexOf("\n", i);
-        if (nl === -1) break;
-        i = nl;
-        wordStart = true; // newline is a word boundary
-      } else if (ch != null && WORD_BOUNDARY.test(ch)) {
-        wordStart = true;
-      } else {
-        wordStart = false;
-      }
-    } else if (state === "sq") {
-      if (ch === "'") {
-        sq.push({ start: open + 1, end: i });
-        state = "code";
-        wordStart = false; // closing quote is word text
-      }
-    } else if (state === "ansq") {
-      if (ch === "\\") i++; // escapes are processed inside $'…'
-      else if (ch === "'") {
-        ansq.push({ start: open + 1, end: i });
-        state = "code";
-        wordStart = false;
-      }
-    } else if (state === "dq") {
-      if (ch === "\\") i++;
-      else if (ch === '"') {
-        dq.push({ start: open + 1, end: i });
-        state = "code";
-        wordStart = false;
-      }
-    } else {
-      if (ch === "\\") i++;
-      else if (ch === '"') {
-        loc.push({ start: open + 1, end: i });
-        state = "code";
-        wordStart = false;
-      }
-    }
-  }
-  return { sq, dq, ansq, loc, unterminated: state === "code" ? null : { state, index: open } };
-}
-
 /** Matches `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\\EOF` at a word position. */
 const HEREDOC_RE = /<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3/g;
 
-export function heredocRegions(text: string): HeredocRegion[] {
-  // Built incrementally: each operator's swallowed-check is computed against
-  // quoteIntervals(text, regions), where `regions` holds every body found so
-  // far. Operators are examined left-to-right, so every body preceding the
-  // current operator is already known — the quote scan skips them, preventing
-  // an earlier body's apostrophes from fabricating a span that hides a later
-  // `<<` (requirement 5).
-  const regions: HeredocRegion[] = [];
-  // Just past the previously consumed terminator line; -1 = none consumed yet.
-  // Bodies follow their operators in the same left-to-right order, so a second
-  // operator on the same command line has its body after the first one's body.
+/**
+ * Single-pass bash lexical scanner (Task 15 phase 1 extract).
+ *
+ * One pass over the text, an explicit quote stack, and a `comment` scan mode
+ * that records comment spans yet still sees `<<` operators on a comment line —
+ * which preserves the *current* (comment-unaware) heredoc behavior exactly.
+ * Phase 2 makes operators inside comments inert (req 4) and flips those
+ * goldens deliberately; phase 1 changes nothing.
+ *
+ * The walk maintains:
+ *  - a quote stack (sq/dq/ansq/loc) — the only real nesting bash quotes have;
+ *  - a list of heredoc body regions, skipped wholesale (every quote character
+ *    inside is literal data, and no quote state carries across them);
+ *  - `wordStart`, a lexer flag (not a preceding-char lookup) so `#` after `\;`
+ *    or `)` stays text and a real word-start `#` opens a comment;
+ *  - `cursor`, the next usable body start, so two `<<` on one line get
+ *    sequential bodies.
+ *
+ * Heredoc operators are detected in both code and comment state (never inside a
+ * quote or a body), which reproduces the old "swallowed" check for free: a `<<`
+ * inside `'…'` is simply never seen as an operator, and a `<<` inside an earlier
+ * body is skipped by the body-jump. The `<<<` here-string tail and the
+ * `text[p-1] === "<"` guard mirror the old regex's `<<<` handling.
+ */
+export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } {
+  const spans: BashLex["spans"] = [];
+  const heredocs: HeredocRegion[] = [];
+  const n = text.length;
+
+  // Quote stack. sq/dq/ansq/loc only — `$()` etc. are not tracked as nesting,
+  // matching the flat state machine of the code this replaces.
+  type QuoteFrame = { kind: "sq" | "dq" | "ansq" | "loc"; open: number };
+  const qstack: QuoteFrame[] = [];
+  /** Next usable heredoc body start (after the most recent terminator line). */
   let cursor = -1;
 
-  HEREDOC_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = HEREDOC_RE.exec(text))) {
-    const opStart = m.index;
-    // `<<<word` is a here-string; this `<<` is its tail, not an operator.
-    if (opStart > 0 && text[opStart - 1] === "<") continue;
-    // So is `<<` inside an already-consumed heredoc body: bodies are data.
-    if (regions.some((r) => opStart >= r.start && opStart < r.end)) continue;
-    // Recompute swallowed per operator: quoteIntervals(text, regions) skips the
-    // bodies found so far, so body apostrophes can't pair with later code-state
-    // quotes into a phantom span that hides this operator.
-    const { sq, dq, ansq, loc } = quoteIntervals(text, regions);
-    const isSwallowed =
-      sq.some((r) => opStart >= r.start && opStart < r.end) ||
-      dq.some((r) => opStart >= r.start && opStart < r.end) ||
-      ansq.some((r) => opStart >= r.start && opStart < r.end) ||
-      loc.some((r) => opStart >= r.start && opStart < r.end);
-    if (isSwallowed) continue;
+  let wordStart = true;
+  /** True while scanning the tail of a comment line: comment text, but heredoc
+   *  operators on the line are still detected (current behavior is preserved). */
+  let inComment = false;
+  let i = 0;
 
-    const delimiter = m[4] as string;
-    const dash = Boolean(m[1]);
-    // 'EOF', "EOF" and \\EOF all suppress expansion in the body.
-    const inert = Boolean(m[3]) || Boolean(m[2]);
-    const opLineEnd = text.indexOf("\n", opStart + m[0].length);
-    if (opLineEnd === -1) continue;
+  // Attempts a heredoc operator at `i` (text[i] === text[i+1] === "<"). On a
+  // real operator it records the body region + span and returns the index just
+  // past the operator token; otherwise returns null (the `<<` is ordinary text).
+  const tryHeredocOp = (at: number): number | null => {
+    const op = parseHeredocOp(text, at);
+    // `<<<` here-string tail (or `<<<<…`): the matched `<<` is preceded by a
+    // `<`, so it is not a heredoc operator. Skip the `<<` as a text pair.
+    if (op && (at === 0 || text[at - 1] !== "<")) {
+      const opEnd = at + op.len;
+      const opLineEnd = text.indexOf("\n", opEnd);
+      if (opLineEnd !== -1) {
+        let scan = Math.max(opLineEnd + 1, cursor);
+        const bodyStart = scan;
+        let bodyEnd = -1;
+        let found = false;
+        while (scan <= n) {
+          const nl = text.indexOf("\n", scan);
+          const line = text.slice(scan, nl === -1 ? n : nl);
+          // `<<-` strips leading tabs from the terminator line first.
+          if ((op.dash ? line.replace(/^\t+/, "") : line) === op.delimiter) {
+            bodyEnd = scan;
+            found = true;
+            cursor = nl === -1 ? n + 1 : nl + 1;
+            break;
+          }
+          if (nl === -1) break;
+          scan = nl + 1;
+        }
+        if (!found) {
+          // Unterminated heredoc: bash uses the rest of the input as the body.
+          bodyEnd = n;
+          cursor = n + 1;
+        }
+        heredocs.push({ start: bodyStart, end: bodyEnd, inert: op.inert });
+        spans.push({ kind: "heredoc", start: bodyStart, end: bodyEnd });
+      }
+      return opEnd;
+    }
+    return null;
+  };
 
-    let scan = Math.max(opLineEnd + 1, cursor);
-    const bodyStart = scan;
-    let bodyEnd = -1;
-    let found = false;
-    while (scan <= text.length) {
-      const nl = text.indexOf("\n", scan);
-      const line = text.slice(scan, nl === -1 ? text.length : nl);
-      // `<<-` strips leading tabs from the terminator line before comparing.
-      if ((dash ? line.replace(/^\t+/, "") : line) === delimiter) {
-        bodyEnd = scan;
-        found = true;
-        cursor = nl === -1 ? text.length + 1 : nl + 1;
+  while (i < n) {
+    // Skip any heredoc body we are currently inside: its quotes are data.
+    let jumped = false;
+    for (const b of heredocs) {
+      if (i >= b.start && i < b.end) {
+        i = b.end; // loop will increment past the terminator line's first char
+        wordStart = true; // a body ends with \n before the terminator line
+        jumped = true;
         break;
       }
-      if (nl === -1) break;
-      scan = nl + 1;
     }
-    if (!found) {
-      // Unterminated heredoc: bash uses the rest of the input as the body (with
-      // a warning), so treat the remainder as the body.
-      bodyEnd = text.length;
-      cursor = text.length + 1;
+    if (jumped) continue;
+
+    const top = qstack[qstack.length - 1];
+    const ch = text[i];
+
+    if (inComment) {
+      if (ch === "\n") {
+        inComment = false;
+        wordStart = true;
+        i++;
+        continue;
+      }
+      // Comment text: no quote state, but `<<` still opens a heredoc (current
+      // behavior is comment-unaware).
+      if (ch === "<" && i + 1 < n && text[i + 1] === "<") {
+        const next = tryHeredocOp(i);
+        if (next !== null) {
+          i = next;
+          wordStart = false;
+          continue;
+        }
+        i += 2;
+        wordStart = false;
+        continue;
+      }
+      i++;
+      continue;
     }
-    regions.push({ start: bodyStart, end: bodyEnd, inert });
+
+    if (top) {
+      // Inside a quote: only the matching closer (or an escape) matters.
+      if (top.kind === "ansq") {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === "'") {
+          spans.push({ kind: "ansq", start: top.open + 1, end: i });
+          qstack.pop();
+          wordStart = false;
+        }
+        i++;
+        continue;
+      }
+      if (top.kind === "loc") {
+        if (ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (ch === '"') {
+          spans.push({ kind: "loc", start: top.open + 1, end: i });
+          qstack.pop();
+          wordStart = false;
+        }
+        i++;
+        continue;
+      }
+      if (top.kind === "sq") {
+        if (ch === "'") {
+          spans.push({ kind: "sq", start: top.open + 1, end: i });
+          qstack.pop();
+          wordStart = false;
+        }
+        i++;
+        continue;
+      }
+      // dq
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') {
+        spans.push({ kind: "dq", start: top.open + 1, end: i });
+        qstack.pop();
+        wordStart = false;
+      }
+      i++;
+      continue;
+    }
+
+    // ---- code state ----
+    if (ch === "'") {
+      qstack.push({ kind: "sq", open: i });
+      i++;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '"') {
+      qstack.push({ kind: "dq", open: i });
+      i++;
+      wordStart = false;
+      continue;
+    }
+    if (ch === "$" && i + 1 < n) {
+      const nx = text[i + 1];
+      if (nx === "'") {
+        qstack.push({ kind: "ansq", open: i + 1 });
+        i += 2;
+        wordStart = false;
+        continue;
+      }
+      if (nx === '"') {
+        qstack.push({ kind: "loc", open: i + 1 });
+        i += 2;
+        wordStart = false;
+        continue;
+      }
+      if (nx === "\\") {
+        i += 2; // \$ is escaped dollar — word text
+        wordStart = false;
+        continue;
+      }
+      // $ followed by a regular character (incl. `(` for $(…)): word text.
+      i++;
+      wordStart = false;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < n) {
+      i += 2; // escape pair: \<char> is word text, clears wordStart
+      wordStart = false;
+      continue;
+    }
+    if (ch === "#" && wordStart) {
+      // Comment to end of line. The newline itself stays in code state, and the
+      // rest of the line is still scanned (comment mode) so a `<<` on it is seen
+      // — preserving the current comment-unaware heredoc behavior.
+      const nl = text.indexOf("\n", i);
+      const end = nl === -1 ? n : nl;
+      spans.push({ kind: "comment", start: i, end });
+      if (nl === -1) {
+        i = n; // whole tail is comment; nothing more to scan
+        break;
+      }
+      inComment = true;
+      i++; // move past '#'; remaining line chars scanned in comment mode
+      continue;
+    }
+    if (ch === "<" && i + 1 < n && text[i + 1] === "<") {
+      const next = tryHeredocOp(i);
+      if (next !== null) {
+        i = next;
+        wordStart = false;
+        continue;
+      }
+      i += 2;
+      wordStart = false;
+      continue;
+    }
+    if (ch != null && WORD_BOUNDARY.test(ch)) {
+      wordStart = true;
+      i++;
+      continue;
+    }
+    wordStart = false;
+    i++;
   }
-  return regions;
+
+  // Arithmetic annotation: `$(…)` is ordinary code in phase 1 (req 3 makes it a
+  // real context in phase 2), but the span is emitted now so the interface is
+  // complete and phase 2's diff is localized. Interior characters are NOT
+  // skipped, preserving current behavior exactly.
+  for (const a of findArithSpans(text)) {
+    spans.push({ kind: "arith", start: a.start, end: a.end });
+  }
+
+  const unterminated =
+    qstack.length > 0
+      ? { kind: qstack[qstack.length - 1]!.kind as SpanKind, index: qstack[qstack.length - 1]!.open }
+      : null;
+
+  return { lex: { spans, unterminated }, heredocs };
+}
+
+/**
+ * Parses a heredoc operator starting at `<<` (text[p] === text[p+1] === "<").
+ * Mirrors `<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3` so behavior is
+ * identical to the regex it replaces: optional `-`, optional whitespace, an
+ * optional escaping `\`, an optional opening quote, the delimiter word, and a
+ * closing quote matching the opening one. Returns the delimiter, whether it is
+ * inert (quoted/escaped), and the token length consumed (including a closing
+ * quote when present).
+ */
+function parseHeredocOp(
+  text: string,
+  p: number,
+): { delimiter: string; dash: boolean; inert: boolean; len: number } | null {
+  let j = p + 2;
+  let dash = false;
+  if (text[j] === "-") {
+    dash = true;
+    j++;
+  }
+  while (j < text.length && (text[j] === " " || text[j] === "\t")) j++;
+  let esc = false;
+  if (text[j] === "\\") {
+    esc = true;
+    j++;
+  }
+  let quote: string | null = null;
+  const qc = text[j];
+  if (qc === "'" || qc === '"') {
+    quote = qc;
+    j++;
+  }
+  const dStart = j;
+  if (!(j < text.length && /[A-Za-z_]/.test(text[j] ?? ""))) return null;
+  j++;
+  while (j < text.length && /[A-Za-z0-9_]/.test(text[j] ?? "")) j++;
+  const delimiter = text.slice(dStart, j);
+  const close = text[j];
+  if (quote) {
+    if (close !== quote) return null;
+    j++; // consume the closing quote
+  }
+  return { delimiter, dash, inert: esc || quote !== null, len: j - p };
+}
+
+/** Finds `$(…)` arithmetic-ish regions (balanced parens) for span annotation. */
+function findArithSpans(text: string): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "$" && text[i + 1] === "(" && text[i + 2] === "(") {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < text.length; j++) {
+        if (text[j] === "(") depth++;
+        else if (text[j] === ")") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      out.push({ start: i, end: j + 1 });
+      i = j + 1;
+    } else {
+      i++;
+    }
+  }
+  return out;
+}
+
+/** Public single-pass scanner (Task 15 interface). */
+export function scanBash(text: string): BashLex {
+  return scan(text).lex;
+}
+
+/** Thin compatible wrapper: same shape as before, backed by the single pass. */
+export function heredocRegions(text: string): HeredocRegion[] {
+  return scan(text).heredocs;
 }
 
 export function expandBash(command: string, resolve: SecretResolver): BashExpansion {
@@ -257,11 +413,19 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
     return varName;
   };
 
-  const regions = heredocRegions(command);
+  const { lex, heredocs } = scan(command);
+  const spans = lex.spans;
+  const unterminated = lex.unterminated;
+  const regions = heredocs;
   const inInertRegion = (index: number): boolean =>
     regions.some((r) => r.inert && index >= r.start && index < r.end);
 
-  const { sq, dq, ansq, loc, unterminated } = quoteIntervals(command, regions);
+  const sq: Interval[] = spans.filter((s) => s.kind === "sq").map((s) => ({ start: s.start, end: s.end }));
+  const dq: Interval[] = spans.filter((s) => s.kind === "dq").map((s) => ({ start: s.start, end: s.end }));
+  const ansq: Interval[] = spans
+    .filter((s) => s.kind === "ansq")
+    .map((s) => ({ start: s.start, end: s.end }));
+  const loc: Interval[] = spans.filter((s) => s.kind === "loc").map((s) => ({ start: s.start, end: s.end }));
   const edits: Array<{ start: number; end: number; text: string }> = [];
 
   for (const ref of findRefs(command)) {
@@ -274,10 +438,9 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
       continue;
     }
     // Fail closed: a quote left open means the lexer cannot know where it ends,
-    // so any later ref may sit inside quoting we cannot see (the review repro
-    // delivered a literal variable name through exactly such a phantom span).
-    // bash rejects the command as a syntax error anyway; reporting it here makes
-    // the failure ours, and ours is the message the model reads.
+    // so any later ref may sit inside quoting we cannot see. bash rejects the
+    // command as a syntax error anyway; reporting it here makes the failure
+    // ours, and ours is the message the model reads.
     if (unterminated && ref.start >= unterminated.index) {
       if (!missing.includes(ref.name)) missing.push(ref.name);
       continue;
