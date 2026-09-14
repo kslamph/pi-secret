@@ -129,21 +129,19 @@ function finalizeKv(c: Candidate, text: string, extend: boolean): Candidate | nu
 
 // L: re-attach base64 padding that the entropy split set (which includes `=`) stripped off the
 // token. See the call site in findCandidates for the full rationale and the unbounded-`=` trap.
-function reattachBase64Padding(text: string, raw: string): string {
+// V(c): padding is re-attached PER OCCURRENCE (anchored to `idx`), not via a global indexOf, so a
+// padded occurrence cannot supply padding to a different occurrence of the same raw that has none.
+function reattachBase64PaddingAt(text: string, raw: string, idx: number): string {
   const len = raw.length;
   if (len === 0) return raw;
   const pad = (4 - (len % 4)) % 4;
   if (pad === 0 || pad > 2) return raw; // 0 = no padding needed; >2 (i.e. 3) = invalid residue
-  let idx = text.indexOf(raw);
-  while (idx !== -1) {
-    const after = idx + raw.length;
-    let eq = 0;
-    while (after + eq < text.length && text[after + eq] === "=") eq++;
-    if (eq === pad) {
-      const next = text[after + eq];
-      if (next === undefined || /[\s"',;)\]}]/.test(next)) return raw + "=".repeat(pad);
-    }
-    idx = text.indexOf(raw, idx + 1);
+  const after = idx + raw.length;
+  let eq = 0;
+  while (after + eq < text.length && text[after + eq] === "=") eq++;
+  if (eq === pad) {
+    const next = text[after + eq];
+    if (next === undefined || /[\s"',;)\]}]/.test(next)) return raw + "=".repeat(pad);
   }
   return raw;
 }
@@ -154,23 +152,48 @@ function reattachBase64Padding(text: string, raw: string): string {
 //
 // N: a `url`-keyed candidate (key text contains "url") captures a plain link only when the value
 // is itself credential-bearing: it carries userinfo (`://` with an `@` before the first `/`), its
-// host is a known credential-in-URL ingest endpoint, or its query carries a credential parameter.
-// Otherwise the link is benign docs/asset prose and must NOT be vaulted (the receipt must not
-// claim a credential was found). Webhooks/DSNs behind `url=` are kept; `image_url=`/
-// `download_url=`/`url=https://example.com` are dropped.
-const KNOWN_CRED_HOSTS = [
-  "hooks.slack.com", "api.slack.com", "discord.com", "api.discord.com",
-  "events.pagerduty.com", "hooks.pagerduty.com", "grafana.com",
+// host is a known credential-in-URL ingest endpoint AND the path matches the ingest prefix, or its
+// query carries a credential parameter. Otherwise the link is benign docs/asset prose and must NOT
+// be vaulted (the receipt must not claim a credential was found). Webhooks/DSNs behind `url=` are
+// kept; `image_url=`/`download_url=`/`url=https://example.com` are dropped.
+//
+// U: the host allow-list requires a PATH PREFIX for every entry — a bare host match produces false
+// positives (the secret rides in headers / basic auth / the query, which the userinfo and query arms
+// already cover). Hosts whose secrets never ride in the path (`api.slack.com`, `grafana.com`, etc.)
+// were deleted. `ingest.sentry.io` requires a numeric project path; `datadoghq.com` / `grafana.net`
+// require one of their ingest prefixes. No entropy test is used in the gate.
+const CRED_HOST_PATHS: Array<{ host: string; suffix?: boolean; paths: string[] }> = [
+  { host: "hooks.slack.com", paths: ["/services/", "/hooks/", "/tokens/"] },
+  { host: "discord.com", paths: ["/api/webhooks/"] },
+  { host: "discordapp.com", paths: ["/api/webhooks/"] },
+  { host: "events.pagerduty.com", paths: ["/v2/enqueue", "/integration/"] },
+  { host: "hooks.pagerduty.com", paths: ["/v2/enqueue", "/integration/"] },
+  { host: "grafana.net", suffix: true, paths: ["/collect/", "/otlp", "/loki/api/1/push", "/loki/api/v1/push", "/instances/"] },
+  { host: "ingest.sentry.io", suffix: true, paths: [] }, // numeric project path handled below
+  { host: "datadoghq.com", suffix: true, paths: ["/api/v2/logs", "/v1/input/", "/lambda/functions/"] },
 ];
 const CRED_QUERY_PARAMS = ["sig", "token", "key", "password", "X-Amz-Credential", "X-Amz-Signature"];
 
 function isCredentialUrl(value: string): boolean {
-  const m = value.match(/^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)/i);
+  const m = value.match(/^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)((?:\/[^?#]*)?)/i);
   if (!m) return false; // not a URL at all -> the caller's other rules decide
   const authority = m[2]!;
   if (authority.includes("@")) return true; // userinfo: real credentials in the URL
   const host = authority.replace(/^[^@]*@/, "").split(":")[0]!.toLowerCase();
-  if (KNOWN_CRED_HOSTS.some((h) => host === h || host.endsWith("." + h))) return true;
+  const path = (m[3] ?? "").toLowerCase();
+  for (const rule of CRED_HOST_PATHS) {
+    const hostOk = rule.suffix
+      ? host === rule.host || host.endsWith("." + rule.host)
+      : host === rule.host;
+    if (!hostOk) continue;
+    if (rule.host === "ingest.sentry.io") {
+      // Sentry ingest: only a numeric project id path is credential-bearing.
+      if (/^\/\d/.test(path)) return true;
+      continue;
+    }
+    if (rule.paths.length === 0) return true;
+    if (rule.paths.some((p) => path.startsWith(p))) return true;
+  }
   const q = value.includes("?") ? value.slice(value.indexOf("?")) : "";
   if (CRED_QUERY_PARAMS.some((p) => new RegExp(`[?&]${p}=`, "i").test(q))) return true;
   return false;
@@ -190,6 +213,37 @@ function isPathValue(value: string): boolean {
   return /^(id_|.*\.(pem|key|p12|pfx))$/i.test(base);
 }
 
+// T: structural exclusions for the entropy path so M's base64 accept does not vault public material.
+// (a) a token whose span falls STRICTLY INSIDE a `-----BEGIN …-----` … `-----END …-----` region is
+// the body of some PEM block — not a secret to capture here (a public key, a cert, a CSR, etc.). We
+// exclude it as a REGION, not by peeking at the ~24 chars before each token: a public-key body is
+// several base64 lines, and only its FIRST line is preceded by the BEGIN header, so a neighbour check
+// would still vault every later line. The PRIVATE KEY block is preserved because the anchored PEM
+// collector captures it WHOLE (its candidate spans the region boundaries: start === BEGIN, end ===
+// after END), so it is never strictly interior. (b) a token that is the payload of a `data:…;base64`
+// URI in the same whitespace-free run is an embedded asset, not a secret.
+function pemRegions(text: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = [];
+  const re = /-----BEGIN [A-Z0-9 ]*-----[\s\S]*?-----END [A-Z0-9 ]*-----/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push({ start: m.index, end: m.index + m[0].length });
+  return out;
+}
+// T(a): true when the candidate sits strictly inside a PEM region (after the BEGIN line, at or before
+// the END line). A whole-block anchored candidate (start===region.start, end===region.end) is NOT
+// interior and so survives.
+function inPemRegion(c: Candidate, regions: Array<{ start: number; end: number }>): boolean {
+  return regions.some((r) => c.start > r.start && c.end <= r.end);
+}
+// (b) a token that is the payload of a `data:…;base64` URI in the same whitespace-free run is an
+// embedded asset (e.g. a pasted screenshot), not a secret to vault.
+function isDataUriPayload(text: string, idx: number): boolean {
+  let runStart = idx;
+  while (runStart > 0 && !/\s/.test(text[runStart - 1]!)) runStart--;
+  const runBefore = text.slice(runStart, idx);
+  return /^data:[^\s]*;base64,?$/i.test(runBefore);
+}
+
 export function findCandidates(text: string): Candidate[] {
   if (!text.trim()) return [];
   const reserved: Array<{ start: number; end: number }> = findRefs(text).map((r) => ({
@@ -198,6 +252,11 @@ export function findCandidates(text: string): Candidate[] {
   }));
   const overlaps = (c: Candidate): boolean =>
     reserved.some((r) => c.start < r.end && c.end > r.start);
+  // T(a): PEM regions — once computed, ANY candidate strictly inside one is a PEM-body line and is
+  // excluded regardless of how it was found. The anchored PRIVATE KEY collector's candidate spans
+  // the region boundary, so it is not interior and is kept whole.
+  const pem = pemRegions(text);
+  const inPem = (c: Candidate): boolean => inPemRegion(c, pem);
 
   const found: Candidate[] = [];
   for (const { re, hint } of ANCHORED) found.push(...collect(text, re, "anchored", hint));
@@ -224,6 +283,7 @@ export function findCandidates(text: string): Candidate[] {
     if (c.confidence === "entropy" && DENY_RE.test(c.value)) return false;
     if (isPathValue(c.value)) return false; // O: private-key paths are not secrets to capture here
     if (isUrlKeyed(c) && !isCredentialUrl(c.value)) return false; // N: plain links behind url-keys
+    if (inPem(c)) return false; // T(a): interior PEM-body lines (public keys, certs, ...) are not secrets
     return true;
   });
 
@@ -232,42 +292,51 @@ export function findCandidates(text: string): Candidate[] {
   // the first index). Keep the reserved-ref and deny filters; check coverage against the
   // wider non-entropy candidates only, so a token appearing twice yields two candidates
   // and applyCapture replaces both.
+  //
+  // S: a scheme-prefixed token is run through the credential-URL test too — a bare DSN or webhook
+  // pasted WITHOUT a `url=` key (`migrate with https://user:pass@db...`, `postgres://user:pass@...`)
+  // is exactly as secret as `DATABASE_URL=<dsn>` and must not be missed just because it lacks a key.
+  // T: PEM bodies and data-URI payloads are excluded structurally (not by entropy).
   const kept: Candidate[] = [...base];
+  const pushEntropy = (token: string, idx: number) => {
+    const cand: Candidate = { value: token, start: idx, end: idx + token.length, confidence: "entropy" };
+    if (overlaps(cand) || DENY_RE.test(cand.value)) return;
+    if (inPem(cand) || isDataUriPayload(text, idx)) return; // T: PEM body lines and data-URI payloads
+    kept.push(cand);
+  };
   for (const raw of new Set(text.split(/[\s,"'()[\]{}<>=;]+/))) {
     if (!raw) continue;
-    if (DENY_RE.test(raw) || /^(?:https?|file|git|ssh|node):/i.test(raw)) continue;
-    // L: re-attach base64 padding the split set stripped. The split set includes `=`, so
-    // `dXNlcjpwYXNzd29yZDEyMw==` reached this loop as `dXNlcjpwYXNzd29yZDEyMw` (22 chars — not a
-    // multiple of 4, not decodable, a corrupt vault copy). Pad is accepted only when <= 2; a
-    // `len % 4 === 1` residue (pad 3) is not valid base64 at all and is left unpadded. An UNBOUNDED
-    // `=` run is the corruption in the opposite direction, so we require EXACTLY `pad` `=` followed
-    // by a delimiter/end: `key=dXNlcg=x=y` must keep capturing `dXNlcg=x=y` (shell assigns `a=b`),
-    // which it does via the KV path below.
-    const token = reattachBase64Padding(text, raw);
-    // M: replace the old `token.includes("/")` ban (which also banned the base64 alphabet: random
-    // bytes average >1 `/` per 22 chars) with a shape test. Reject only a token that STARTS with a
-    // scheme or looks like a filesystem path; a bare base64 blob (`CzBVep/E6RM...`) starts with
-    // neither, so it is no longer lost.
-    if (/^[a-z][a-z0-9+.-]*:\/\//.test(token) || /^(?:\.\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(token)) continue;
-    if (base.some((c) => token.includes(c.value))) continue;
-    const ent = shannonEntropy(token);
-    // A token that is valid base64 (standard or url-safe alphabet) is a credential candidate on its
-    // entropy alone — looksCredentialish's own `/^[A-Za-z0-9._/-]+$/ && includes("/") rule rejects
-    // base64-with-slash, so without this bypass the entropy fallback would still miss every real
-    // blob. scrub.ts is out of scope for this task, so the bypass lives here.
-    const base64ish = /^[A-Za-z0-9+/]+=*$/.test(token) || /^[A-Za-z0-9_-]+=?$/.test(token);
-    if (token.length < 20 || ent <= 3.9) continue;
-    if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) continue;
-    let idx = text.indexOf(token);
+    if (DENY_RE.test(raw)) continue;
+    let idx = text.indexOf(raw);
     while (idx !== -1) {
-      const cand: Candidate = {
-        value: token,
-        start: idx,
-        end: idx + token.length,
-        confidence: "entropy",
-      };
-      if (!overlaps(cand) && !DENY_RE.test(cand.value)) kept.push(cand);
-      idx = text.indexOf(token, idx + token.length);
+      // V(c): re-attach padding for THIS occurrence so a padded occurrence cannot supply padding
+      // to an unpadded one of the same raw.
+      const token = reattachBase64PaddingAt(text, raw, idx);
+      if (base.some((c) => token.includes(c.value) || c.value.includes(token))) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      // S: scheme-prefixed token — capture only if credential-bearing (userinfo / cred query);
+      // benign scheme links stay skipped.
+      if (/^[a-z][a-z0-9+.-]*:\/\//.test(token)) {
+        if (isCredentialUrl(token)) pushEntropy(token, idx);
+        idx = text.indexOf(raw, idx + raw.length);
+        continue;
+      }
+      // remaining non-// scheme forms (file:, git:, ssh:, node:) are not credentials here
+      if (/^(?:https?|file|git|ssh|node):/i.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      // M: replace the old `token.includes("/")` ban (which also banned the base64 alphabet: random
+      // bytes average >1 `/` per 22 chars) with a shape test. Reject only a token that STARTS with a
+      // filesystem path stem; a bare base64 blob (`CzBVep/E6RM...`) starts with neither, so it is no
+      // longer lost.
+      if (/^(?:\.\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      const ent = shannonEntropy(token);
+      // A token that is valid base64 (standard or url-safe alphabet) is a credential candidate on its
+      // entropy alone — looksCredentialish's own `/^[A-Za-z0-9._/-]+$/ && includes("/") rule rejects
+      // base64-with-slash, so without this bypass the entropy fallback would still miss every real
+      // blob. scrub.ts is out of scope for this task, so the bypass lives here.
+      const base64ish = /^[A-Za-z0-9+/]+=*$/.test(token) || /^[A-Za-z0-9_-]+=?$/.test(token);
+      if (token.length < 20 || ent <= 3.9) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      pushEntropy(token, idx);
+      idx = text.indexOf(raw, idx + raw.length);
     }
   }
   return kept.sort((a, b) => a.start - b.start);
@@ -315,8 +384,11 @@ export function suggestNameForTest(candidate: Candidate, context: string, taken:
     hintAlias.add(t);
     hintAlias.add(ALIAS[t] ?? t);
   }
+  // W: match context words on WORD boundaries, not as bare substrings — `lower.includes("aws")`
+  // fired inside "laws" and `dev` inside "development", drifting names between drafts of the same
+  // paste. A context word must appear as its own word (e.g. surrounded by non-word chars / boundaries).
   const present = CONTEXT_WORDS
-    .filter((w) => lower.includes(w))
+    .filter((w) => new RegExp(`\\b${w}\\b`).test(lower))
     .map((w) => ALIAS[w] ?? slug(w))
     .filter((p) => !hintAlias.has(p) && !hintAlias.has(ALIAS[p] ?? p));
   const hint = hintSlug;
@@ -470,29 +542,37 @@ export interface CapturedItem {
 export function applyCapture(
   text: string,
   items: CapturedItem[],
-): { text: string; captured: CapturedItem[]; skipped: number } {
+): { text: string; captured: CapturedItem[]; skipped: { nameConflict: number; staleSpan: number } } {
   const captured: CapturedItem[] = [];
-  let skipped = 0;
+  let nameConflicts = 0;
+  let staleSpans = 0;
   let out = "";
   let cursor = 0;
-  const sorted = [...items].sort((a, b) => a.candidate.start - b.candidate.start);
+  // V(a): sort by start, then by END (widest last) so two candidates sharing a start offset (a KV
+  // match and an entropy match at the same position) are settled deterministically, not by caller
+  // order — matching what `dedupe` already does for the find side.
+  const sorted = [...items].sort(
+    (a, b) => a.candidate.start - b.candidate.start || b.candidate.end - a.candidate.end,
+  );
   // P: bind each name to exactly one value; a name already bound to a different value is a conflict
-  // and the later (start-order) item carrying it is skipped.
+  // and the later (start-order) item carrying it is skipped. V(b): this is a *name conflict* (a wiring
+  // bug) and is reported separately from a *stale span* (the buffer moved) so a receipt can tell the
+  // two apart instead of a single opaque `skipped` count.
   const nameToValue = new Map<string, string>();
-  const skip = new Set<CapturedItem>();
+  const skipNameConflict = new Set<CapturedItem>();
   for (const item of sorted) {
     const prev = nameToValue.get(item.name);
-    if (prev !== undefined && prev !== item.candidate.value) skip.add(item);
+    if (prev !== undefined && prev !== item.candidate.value) skipNameConflict.add(item);
     else nameToValue.set(item.name, item.candidate.value);
   }
   for (const item of sorted) {
-    if (skip.has(item)) { skipped++; continue; }
+    if (skipNameConflict.has(item)) { nameConflicts++; continue; }
     const { candidate: c, name } = item;
-    if (c.start < cursor) { skipped++; continue; } // overlapping / already-covered span
-    if (text.slice(c.start, c.end) !== c.value) { skipped++; continue; } // H: fail closed on span mismatch
+    if (c.start < cursor) { staleSpans++; continue; } // overlapping / already-covered span
+    if (text.slice(c.start, c.end) !== c.value) { staleSpans++; continue; } // H: fail closed on span mismatch
     out += text.slice(cursor, c.start) + `{{sec:${name}}}`;
     cursor = c.end;
     captured.push({ candidate: c, name });
   }
-  return { text: out + text.slice(cursor), captured, skipped };
+  return { text: out + text.slice(cursor), captured, skipped: { nameConflict: nameConflicts, staleSpan: staleSpans } };
 }

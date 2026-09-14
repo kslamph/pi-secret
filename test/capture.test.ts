@@ -598,18 +598,20 @@ describe("task 17 — P: applyCapture checks name->value consistency and counts 
     const out = applyCapture(text, items);
     // exactly one value may carry the name; the conflict is skipped, never collapsed.
     expect(out.captured).toHaveLength(1);
-    expect(out.skipped).toBe(1);
+    expect(out.skipped.nameConflict).toBe(1);
+    expect(out.skipped.staleSpan).toBe(0);
     expect(new Set(out.captured.map((p) => p.name)).size).toBe(out.captured.length);
     expect(out.captured[0]!.name).toBe("shared");
     expect(out.captured[0]!.candidate.value === GH || out.captured[0]!.candidate.value === AKIA).toBe(true);
   });
-  it("counts skips honestly: a stale span yields captured < items and skipped >= 1", () => {
+  it("counts skips honestly: a stale span yields captured < items and a staleSpan skip", () => {
     const text = `here ${GH}`;
     const cs = findCandidates(text);
     const bad: CapturedItem = { candidate: { ...cs[0]!, value: "not-the-value" }, name: "x" };
     const out = applyCapture(text, [bad]);
     expect(out.captured).toHaveLength(0);
-    expect(out.skipped).toBe(1);
+    expect(out.skipped.staleSpan).toBe(1);
+    expect(out.skipped.nameConflict).toBe(0);
     expect(out.text).toBe(text);
   });
 });
@@ -639,5 +641,142 @@ describe("task 17 — R: key hint preferred, no doubled context words, names not
     const cs = findCandidates("db_password=Tr0ub4dor3xyzabcQ");
     const names = suggestNames(cs, "db_password=Tr0ub4dor3xyzabcQ");
     expect(names[0]).toBe("db_password");
+  });
+});
+
+describe("task 17 — S: bare credential-bearing URLs are captured (leak closed)", () => {
+  it("captures a bare DSN with userinfo pasted without a url= key", () => {
+    const text = "migrate with https://admin:S3cr3tValue@db.internal:5432/app";
+    const cs = findCandidates(text);
+    expect(cs.length).toBeGreaterThanOrEqual(1);
+    expect(cs[0]!.value).toBe("https://admin:S3cr3tValue@db.internal:5432/app");
+    expect(cs[0]!.value).toContain("@"); // userinfo, the credential
+  });
+  it("captures a bare postgres:// DSN with userinfo", () => {
+    const text = "connect string postgres://admin:S3cr3tValue@db.internal:5432/app";
+    const cs = findCandidates(text);
+    expect(cs.length).toBeGreaterThanOrEqual(1);
+    expect(cs[0]!.value).toBe("postgres://admin:S3cr3tValue@db.internal:5432/app");
+  });
+  it("still does NOT capture a benign bare https link (no userinfo / no cred host / no cred query)", () => {
+    expect(findCandidates("see https://api.github.com/repos/x/y for details")).toEqual([]);
+  });
+  it("captures a bare webhook URL (cred host + ingest path) without a url= key", () => {
+    const hook = "https://hooks.slack.com/services/T01234567/B01234567/EXAMPLE-NOT-A-REAL-WEBHOOK";
+    const cs = findCandidates(`ping ${hook} now`);
+    expect(cs.length).toBeGreaterThanOrEqual(1);
+    expect(cs[0]!.value).toBe(hook);
+  });
+});
+
+describe("task 17 — T: PEM bodies and data-URI payloads are NOT vaulted", () => {
+  const publicKey =
+    "-----BEGIN PUBLIC KEY-----\nMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALQZ3vtPqGmZ0jNjF0lNMQA8tZ4tq\nx0jN0kZ1vX0pQwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOpAsDfGhJkLzXcVb=\n-----END PUBLIC KEY-----";
+  const dataUri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCA";
+  const privateKey =
+    "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUEwggEBAgECggEBAK4B\n-----END PRIVATE KEY-----";
+  const blob = "CzBVep/E6RM4XYKnzPEbQGWKr9T5I0ht"; // bare base64 token (M: entropy path)
+  it("does NOT capture a -----BEGIN PUBLIC KEY----- block (interior body lines excluded as a region)", () => {
+    expect(findCandidates(publicKey)).toEqual([]);
+  });
+  it("does NOT capture a data:image/png;base64 payload (embedded asset)", () => {
+    expect(findCandidates(dataUri)).toEqual([]);
+  });
+  it("STILL captures a -----BEGIN PRIVATE KEY----- block (existing PEM path, spans the region boundaries)", () => {
+    const cs = findCandidates(privateKey);
+    expect(cs.length).toBeGreaterThanOrEqual(1);
+    expect(cs[0]!.hint).toBe("private_key");
+    expect(cs[0]!.confidence).toBe("anchored");
+  });
+  it("captures a lone base64 blob OUTSIDE any PEM region (entropy path still works)", () => {
+    const cs = findCandidates(`secret=${blob}`);
+    expect(cs.length).toBe(1);
+    expect(cs[0]!.value).toBe(blob);
+  });
+  it("captures a real secret next to a public key block (no cross-contamination)", () => {
+    const text = `${publicKey}\nalso password=Tr0ub4dor3xyzabcQ`; // key= value is a separate KV secret
+    const cs = findCandidates(text);
+    // the PUBLIC key body is excluded; the KV password is still captured
+    expect(cs.some((c) => c.value === "Tr0ub4dor3xyzabcQ")).toBe(true);
+    expect(cs.every((c) => !c.value.startsWith("MFww"))).toBe(true);
+  });
+});
+
+describe("task 17 — U: host-plus-path table for the URL gate", () => {
+  it("drops api.slack.com docs/method links (no ingest path)", () => {
+    expect(findCandidates("api_docs_url=https://api.slack.com/methods/chat.postMessage")).toEqual([]);
+  });
+  it("drops grafana.com dashboard links (bare host, no ingest path)", () => {
+    expect(findCandidates("dashboard_url=https://grafana.com/grafana/dashboards/1234-node-exporter")).toEqual([]);
+  });
+  it("keeps hooks.slack.com/services/ webhooks", () => {
+    const hook = "https://hooks.slack.com/services/T01234567/B01234567/EXAMPLE-NOT-A-REAL-WEBHOOK";
+    const cs = findCandidates(`url=${hook}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(hook);
+  });
+  it("keeps discord.com/api/webhooks/ but drops discord CDN attachments", () => {
+    const webhook = "https://discord.com/api/webhooks/123/abc-DEF-ghi";
+    expect(findCandidates(`url=${webhook}`)[0]?.value).toBe(webhook);
+    const cdn = "https://cdn.discordapp.com/attachments/123/456/image.png";
+    expect(findCandidates(`url=${cdn}`)).toEqual([]);
+  });
+  it("keeps presigned S3 via the query arm (X-Amz-Credential) even on a bare host", () => {
+    const s3 = "https://s3.amazonaws.com/bucket/obj?X-Amz-Credential=AKIAEXAMPLE%2F20260914%2Fus-east-1%2Fs3%2Faws4_request";
+    const cs = findCandidates(`url=${s3}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(s3);
+  });
+  it("keeps grafana.net ingest paths (collect/otlp/loki push/instances)", () => {
+    const url = "https://logs-prod-us-central1.grafana.net/loki/api/v1/push";
+    const cs = findCandidates(`url=${url}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(url);
+  });
+  it("keeps *.ingest.sentry.io with a numeric project path", () => {
+    const url = "https://123456.ingest.sentry.io/789/abc";
+    const cs = findCandidates(`url=${url}`);
+    expect(cs).toHaveLength(1);
+    expect(cs[0]!.value).toBe(url);
+  });
+});
+
+describe("task 17 — V: correctness nits", () => {
+  it("V(c): padding is re-attached per occurrence, not from a global indexOf", () => {
+    const text = "first dXNlcjpwYXNzd29yZDEyMw then dXNlcjpwYXNzd29yZDEyMw== done";
+    const cs = findCandidates(text);
+    const values = cs.map((c) => c.value);
+    expect(values).toContain("dXNlcjpwYXNzd29yZDEyMw"); // unpadded occurrence stays 22 chars
+    expect(values).toContain("dXNlcjpwYXNzd29yZDEyMw=="); // padded occurrence becomes 24 chars
+    // every captured value is either the 22-char raw or a clean 24-char decodable form
+    expect(cs.every((c) => c.value.length === 22 || (c.value.length === 24 && c.value.endsWith("==")))).toBe(true);
+  });
+  it("V(a): applyCapture tiebreaks equal-start candidates by end, independent of input order", () => {
+    const text = "ABCDEFGHIJ";
+    const a: CapturedItem = { candidate: { value: "ABC", start: 0, end: 3, confidence: "kv", hint: "k" }, name: "a" };
+    const b: CapturedItem = { candidate: { value: "ABCDEFGHIJ", start: 0, end: 10, confidence: "entropy" }, name: "b" };
+    const fwd = applyCapture(text, [a, b]);
+    const rev = applyCapture(text, [b, a]);
+    expect(fwd.text).toBe(rev.text);
+    expect(fwd.captured.map((p) => p.name).sort()).toEqual(rev.captured.map((p) => p.name).sort());
+    // the widest (b) wins the shared start deterministically
+    expect(fwd.captured[0]!.name).toBe("b");
+  });
+});
+
+describe("task 17 — W: context-word match is word-boundary", () => {
+  it("does NOT fire 'aws' inside 'laws' or 'dev' inside 'development'", () => {
+    // a token in a sentence that merely contains the substring of a context word must not inherit it
+    const c = findCandidates("Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4")[0]!; // bare entropy token, no real context
+    const lawsCtx = suggestNameForTest(c, "the new laws take effect tomorrow Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4", []);
+    const devCtx = suggestNameForTest(c, "our development branch uses Lk2#mP9qWw8$Xy5zB3nVc7Rf1Jh4", []);
+    expect(lawsCtx).not.toContain("aws");
+    expect(devCtx).not.toContain("dev");
+    expect(lawsCtx).toBe("secret"); // no real context word present
+    expect(devCtx).toBe("secret");
+  });
+  it("still fires a genuine standalone context word (staging)", () => {
+    const c = findCandidates(`use this for the staging deploy: ${GH}`)[0]!;
+    expect(suggestNameForTest(c, `use this for the staging deploy: ${GH}`, [])).toBe("gh_staging_deploy");
   });
 });
