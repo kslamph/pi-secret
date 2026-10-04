@@ -1,0 +1,21 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      # The canary sweep is the gate on "safe to use" (spec §13): every scenario is
+      # path-agnostic — it does not care WHICH hook would have leaked, only that
+      # nothing did. It runs the real extension against a scripted provider, so
+      # it is slower than the unit suite and kept as its own step.
+      - run: npm run test:canary

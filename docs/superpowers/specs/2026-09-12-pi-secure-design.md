@@ -391,8 +391,7 @@ executing a command that would send the literal placeholder.
    by detector: reliably parsing shell is what this project's lexer has repeatedly failed
    at, and a fragile nested-shell detector would produce false blocks that read as
    pi-secure being broken.
-9. **Bash lexical coverage is bounded by a two-scanner design, and three shapes are knowingly
-   left open until Task 15.** Delimiters must currently match `[A-Za-z_][A-Za-z0-9_]*`, but
+9. **(Closed by Task 15's phase-2 single-pass scanner.)** ~~~ Bash lexical coverage is bounded by a two-scanner design, and three shapes are knowingly left open until Task 15.~~~ Historical record: delimiters must currently match `[A-Za-z_][A-Za-z0-9_]*`, but
    bash accepts any unquoted word: `cat <<1`, `cat <<E-O-F`, `cat <<EOF.txt` all run, and their
    bodies are then not excluded from quote tracking — with an even apostrophe count that is the
    silent-non-delivery class again. `# cat <<EOF` is a comment in bash and registers an operator
@@ -413,8 +412,9 @@ executing a command that would send the literal placeholder.
     brackets starts consuming markup. Encoded forms of vaulted values, including line-wrapped
     base64 (`kubectl get secret -o yaml`, `git diff` of a credential file) and either hex case,
     are covered — round 2 measured three leaks in exactly that area before fixing them.
-11. **A truncated encoding is currently not masked — live until Task 16 lands.** `maskForms`
-    requires the whole derived form to appear, so an *encoded* vaulted secret whose base64 is cut by
+11. **(Closed by Task 16.)** A truncated encoding is now masked: each derived encoding contributes a head-window and a tail-window form, and a window hit masks the whole visible run of the encoding's alphabet. Residual: the mask stops at the first whitespace, so a *wrapped* truncated run is masked only up to the wrap — pinned as a deliberate residual in `test/scrub.test.ts`.
+
+Historical note: `maskForms` used to require the whole derived form to appear, so an *encoded* vaulted secret whose base64 is cut by
     output truncation is left visible: measured, cutting an 88-character encoding at 84 characters
     exposes 94% of it with zero hits. pi truncates to the **last** 5000 lines / 50KB and can return a
     partial last line, so the surviving fragment is typically the tail. This applies only to secrets

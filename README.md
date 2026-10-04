@@ -2,7 +2,10 @@
 
 pi-secure is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent that keeps credentials out of everything an LLM endpoint can see — request bodies, session files, transcripts, exports — while letting the model *use* those credentials in shell commands and tool calls without friction. You should never have to paste a token into a conversation, and if you do, it should not end up in the conversation.
 
-> **Status:** as of v0.0.1 this repository ships the package scaffold only (entry stub + tests); the behavior described below lands in Tasks 2–14.
+> **Status:** the extension is wired and the canary sweep passes — `npm test` (381 tests) and
+> `npm run test:canary` (7 end-to-end scenarios plus a filesystem sweep) are green, and the vault,
+> capture, injection and scrubbing paths all run inside pi. Known gaps are listed under **Status and
+> known gaps** below; read them before relying on this for anything you cannot afford to leak.
 
 ## The `{{sec:NAME}}` contract
 
@@ -43,6 +46,30 @@ pi install /home/kslam/piext/pi-secure
 # published release
 pi install git:github.com/kslamph/pi-secure@vX.Y.Z
 ```
+
+## Status and known gaps
+
+Working: capture-on-paste, the `/sec` command family, masked entry, clipboard-only restore,
+`{{sec:NAME}}` expansion through bash (child env only) and other tool arguments, value-exact and
+shape scrubbing at `tool_result`, `message_end`, `context` and `before_provider_request`, and
+rewriting of pi's truncated-output snapshot.
+
+Known gaps, in rough order of how much they should worry you:
+
+1. **`read`/`grep` on a credential file sends raw secrets to the endpoint** by default. This is the
+   largest accepted hole — it trades file round-trip fidelity for logger protection. Flip
+   `--sec-file-reads` to mask shapes in file reads too, at the cost of being unable to `edit` a
+   credential-bearing file.
+2. **Transformed secrets escape masking.** `base64`, `cut`, `rev`, hashing — shape matching is
+   hygiene, not a boundary. A *truncated* encoding is now masked (Task 16, window match on the
+   head/tail of each derived encoding); only a run cut mid-wrap degrades to masked-up-to-the-wrap,
+   which is pinned as an accepted residual.
+3. **Bash lexical coverage was partial; Task 15 phase 2 closed it.** Unusual heredoc delimiters
+   (`<<1`, `<<E-O-F`, `<<EOF.txt`), heredoc operators inside comments, `$((…<<…))` arithmetic
+   context, and subshell-vs-command-substitution `)` are all handled by the single-pass scanner.
+4. **`!` user-bash pastes are not captured** (known hole). `/export` round-trip is now covered by
+   an integration test that exports the real session to HTML and greps the payload.
+5. No defense against an actively hostile endpoint — see the threat model below.
 
 ## Explicit threat model
 
