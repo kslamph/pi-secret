@@ -145,6 +145,40 @@ interface Form {
   form: string;
   token: string;
   kind: "raw" | "encoding";
+  /** A head/tail window of a longer encoding (Task 16). A match means "this
+   *  secret's encoding is present but CUT"; the span is then grown over
+   *  `alphabet` so the whole visible run is masked, not just the window. */
+  window?: boolean;
+  alphabet?: RegExp;
+}
+
+/**
+ * Task 16 — truncation-aware masking.
+ *
+ * An encoding is only masked today when the WHOLE form appears. pi's bash tool
+ * truncates to the last 5000 lines / 50KB and can return a PARTIAL last line, so
+ * the surviving fragment is usually the TAIL: measured, an 88-char encoding cut at
+ * 84 leaves 94% of it visible and nothing masked.
+ *
+ * Two guards keep windowing from becoming a prose-eater. `WINDOW_MIN_FORM` stops
+ * short encodings being windowed at all — an 8-byte secret's base64 is 12 chars and
+ * its prefix is plausible inside ordinary text, so that case stays on the
+ * whole-form match. And the extension below can only GROW a match that an exact
+ * 24-char window already proved, so it never turns prose into a match.
+ */
+const WINDOW_MIN_FORM = 40;
+/** Length of each window: two per encoding (head and tail), not one per cut point. */
+const WINDOW_SIZE = 24;
+
+/**
+ * Characters that can belong to an encoding — the bound on run extension.
+ * Checked hex-first: hex's alphabet is a subset of base64's, so the order is what
+ * keeps a hex run from extending across adjacent base64-looking text.
+ */
+function alphabetFor(form: string): RegExp {
+  if (/^[0-9a-f]+$/i.test(form)) return /[0-9a-fA-F]/;
+  if (form.includes("-") || form.includes("_")) return /[A-Za-z0-9_-]/;
+  return /[A-Za-z0-9+/=]/;
 }
 
 interface Span {
@@ -191,19 +225,38 @@ function maskForms(text: string, forms: Form[]): ScrubResult {
   // Collect every occurrence, all in ORIGINAL offset space so raw (text coords) and
   // encoding (stripped coords mapped back) spans coexist.
   const spans: Span[] = [];
-  for (const { form, token, kind } of forms) {
+  for (const { form, token, kind, window, alphabet } of forms) {
     if (form.length < MIN_SCRUBABLE_LENGTH) continue;
     const search = kind === "raw" ? text : stripped;
     let idx = search.indexOf(form);
     if (idx === -1) continue;
     if (kind === "encoding" && !noWhitespace && origPos === null) origPos = buildOrigPos(text);
     for (;;) {
+      // A window match proves the encoding is present but cut. Mask the whole
+      // visible run rather than the window alone, so any cut point is covered:
+      // extend outward over the encoding's own alphabet. Operating on `search`
+      // (the whitespace-stripped buffer for encodings) is what makes this
+      // whitespace-tolerant, which matters because tools wrap and truncate.
+      let s = idx;
+      let e = idx + form.length;
+      if (window && alphabet && kind === "encoding") {
+        // Extend over the encoding's own alphabet, but NEVER across whitespace.
+        // The stripped buffer makes whitespace invisible, so two characters can be
+        // adjacent here and far apart in the original; consult the original offsets
+        // and stop at a gap. Without this, `<encoding> and then some prose` masks the
+        // prose as well, because "and" is entirely base64-alphabet. Over-masking is
+        // the worse failure: it makes ordinary output unreadable, and unreadable
+        // output is how users start pasting tokens by hand (plan's stop rule).
+        const contiguous = (k: number): boolean => noWhitespace || origPos![k] === origPos![k - 1]! + 1;
+        while (e < search.length && alphabet.test(search[e]!) && contiguous(e)) e++;
+        while (s > 0 && alphabet.test(search[s - 1]!) && contiguous(s)) s--;
+      }
       if (kind === "raw" || noWhitespace) {
         // contiguous: stripped===text so stripped-index == text-index
-        spans.push({ start: idx, end: idx + form.length, token });
+        spans.push({ start: s, end: e, token });
       } else {
-        const start = origPos![idx]!;
-        const end = (origPos![idx + form.length - 1] ?? start) + 1;
+        const start = origPos![s]!;
+        const end = (origPos![e - 1] ?? start) + 1;
         spans.push({ start, end, token });
       }
       idx = search.indexOf(form, idx + form.length);
@@ -238,6 +291,23 @@ function maskForms(text: string, forms: Form[]): ScrubResult {
 /** Build the candidate form set for a set of secrets, longest form first. */
 function collectForms(secrets: readonly string[], tokenFor: (value: string) => string): Form[] {
   const forms: Form[] = [];
+
+  /**
+   * Register one encoding plus, when it is long enough to be safe, a head and a
+   * tail window (Task 16). Every encoding goes through here — including the
+   * unpadded and uppercase-hex variants derived below — because a truncated
+   * `base64 -w0 | tr -d '='` or a truncated uppercase-hex encoding is exactly as
+   * exposed as a truncated padded one, and windowing only the first form of each
+   * kind would have left those two silently unmasked.
+   */
+  const addEncoding = (form: string, token: string): void => {
+    forms.push({ form, token, kind: "encoding" });
+    if (form.length < WINDOW_MIN_FORM) return;
+    const alphabet = alphabetFor(form);
+    forms.push({ form: form.slice(0, WINDOW_SIZE), token, kind: "encoding", window: true, alphabet });
+    forms.push({ form: form.slice(-WINDOW_SIZE), token, kind: "encoding", window: true, alphabet });
+  };
+
   for (const value of secrets) {
     if (value.length < MIN_SCRUBABLE_LENGTH) continue;
     const token = tokenFor(value);
@@ -245,9 +315,14 @@ function collectForms(secrets: readonly string[], tokenFor: (value: string) => s
     for (const form of derivedForms(value)) {
       if (form.length < MIN_SCRUBABLE_LENGTH) continue;
       const kind: "raw" | "encoding" = form === value ? "raw" : "encoding";
-      forms.push({ form, token, kind });
-      if (kind === "encoding") {
-        // Req 14: standard base64 with padding stripped (`base64 -w0 | tr -d '='`).
+      if (kind === "raw") {
+        // NEVER window a raw value: that is the prose-mangling class spec §12.10
+        // records, and an 8-character vault entry makes it reachable.
+        forms.push({ form, token, kind });
+        continue;
+      }
+      addEncoding(form, token);
+      // Req 14: standard base64 with padding stripped (`base64 -w0 | tr -d '='`).
         // Among encodings only padded standard base64 ends with `=`, so this is
         // index-free and survives a derivedForms reorder.
         if (form.endsWith("=")) {
@@ -256,15 +331,14 @@ function collectForms(secrets: readonly string[], tokenFor: (value: string) => s
           // value yields >= 11 unpadded base64 chars), so a future encoding whose
           // padding strip could undercut the floor is caught at the push.
           if (unpadded.length >= MIN_SCRUBABLE_LENGTH) {
-            forms.push({ form: unpadded, token, kind: "encoding" });
+            addEncoding(unpadded, token);
           }
         }
         // Req 10: uppercase hex twin (hex encoding only) — still a derived form
         // keyed to the same name, never an entropy scan of arbitrary hex runs.
         if (/^[0-9a-f]+$/.test(form)) {
-          forms.push({ form: form.toUpperCase(), token, kind: "encoding" });
+          addEncoding(form.toUpperCase(), token);
         }
-      }
     }
   }
   forms.sort((a, b) => byLengthDesc(a.form, b.form));

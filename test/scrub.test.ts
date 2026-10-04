@@ -295,3 +295,120 @@ describe("looksCredentialish", () => {
     expect(looksCredentialish("the quick brown fox jumps over the lazy dog")).toBe(false);
   });
 });
+
+// ===== Task 16: truncation-aware masking of encoded secrets =====
+// pi's bash tool truncates to the LAST 5000 lines / 50KB and can return a partial
+// last line, so the surviving fragment is usually the TAIL. Measured before the
+// fix: an 88-char base64 encoding wrapped at 64 columns and cut at 84 leaves 94% of
+// the secret visible with zero hits.
+
+const SECRET64 = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A7b8C9d0E1f2G3h4";
+const B64_64 = Buffer.from(SECRET64).toString("base64");
+
+describe("Task 16 — truncated encodings", () => {
+  it("masks a TAIL-truncated single-line base64 (pi's actual case)", () => {
+    // pi truncates to the last N lines and can return a PARTIAL last line, so the
+    // common case is one cut run of encoding with no wrapping in it.
+    expect(B64_64.length).toBeGreaterThan(84);
+    const out = maskValues(B64_64.slice(0, 84), [SECRET64]);
+    expect(out.hits).toBe(1);
+    expect(out.text).toBe("{{sec:redacted}}");
+  });
+
+  it("masks the wrapped run up to the wrap, and no further (documented residual)", () => {
+    // RESIDUAL, pinned deliberately: extension stops at whitespace so it cannot eat
+    // adjacent prose, which means a fragment that continues past a line wrap has its
+    // post-wrap remainder left visible. Chosen per the plan's stop rule — over-masking
+    // the whole diff is the worse failure. Pinning it so the trade is visible.
+    const wrapped = B64_64.slice(0, 50) + "\n" + B64_64.slice(50);
+    const truncated = wrapped.slice(0, 84);
+    const out = maskValues(truncated, [SECRET64]);
+    expect(out.hits).toBe(1);
+    expect(out.text.startsWith("{{sec:redacted}}\n")).toBe(true);
+    expect(out.text).not.toContain(B64_64.slice(0, 24));
+  });
+
+  it("masks a HEAD-truncated encoding (head, pagers, streamed partials)", () => {
+    const truncated = "| " + B64_64.slice(0, 84);
+    const out = maskValues(truncated, [SECRET64]);
+    expect(out.hits).toBe(1);
+    expect(out.text).not.toContain("A1b2C3d4E5f6");
+  });
+
+  it("masks a mid-line cut at a NON-4-aligned offset", () => {
+    // 4-aligned base64 cuts are the easy case; a cut mid-quantum is what an
+    // arbitrary truncation actually produces.
+    for (const cut of [57, 71, 83]) {
+      const out = maskValues(`| ${B64_64.slice(0, cut)}`, [SECRET64]);
+      expect(out.hits, `cut=${cut}`).toBe(1);
+      expect(out.text, `cut=${cut}`).toBe("| {{sec:redacted}}");
+    }
+  });
+
+  it("masks a truncated UPPERCASE hex encoding", () => {
+    const hex = Buffer.from(SECRET64).toString("hex").toUpperCase();
+    const out = maskValues(`| ${hex.slice(0, 60)}`, [SECRET64]);
+    expect(out.hits).toBe(1);
+    expect(out.text).not.toContain("A1B2C3D4");
+  });
+
+  it("masks a truncated base64 with padding stripped (base64 -w0 | tr -d '=')", () => {
+    const unpadded = B64_64.replace(/=+$/, "");
+    expect(unpadded).not.toBe(B64_64);
+    const out = maskValues(`| ${unpadded.slice(0, 70)}`, [SECRET64]);
+    expect(out.hits).toBe(1);
+    expect(out.text).not.toContain("A1b2C3");
+  });
+
+  it("masks a truncated base64url encoding", () => {
+    const b64url = Buffer.from(SECRET64).toString("base64url");
+    const out = maskValues(`| ${b64url.slice(0, 70)}`, [SECRET64]);
+    expect(out.hits).toBe(1);
+  });
+});
+
+describe("Task 16 — the stop rule: over-masking is worse than the gap", () => {
+  it("does NOT window encodings under 40 chars — an accepted residual", () => {
+    // An 8-byte secret base64s to 12 chars, whose prefix is plausible inside
+    // ordinary prose. Windowing it would mask prose, so short encodings stay on
+    // the whole-form match alone and a TRUNCATED short encoding is left visible.
+    // That is the deliberate trade (plan's stop rule: over-masking is worse), and
+    // this test pins it so nobody "fixes" it by lowering the floor.
+    const small = "test1234";
+    const b64 = Buffer.from(small).toString("base64");
+    const truncated = b64.slice(0, 8);
+    const out = maskValues(`the value is ${truncated} ok`, [small]);
+    expect(out.hits).toBe(0);
+    expect(out.text).toBe(`the value is ${truncated} ok`);
+    // The FULL short encoding still matches whole-form — that behaviour predates
+    // Task 16 and must not regress.
+    expect(maskValues(`the value is ${b64} ok`, [small]).hits).toBe(1);
+  });
+
+  it("leaves ordinary prose and long base64-ish blobs alone", () => {
+    const blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="; // a plausible, non-secret blob
+    const out = maskValues(`the checksum is ${blob} per the docs`, [SECRET64]);
+    expect(out.hits).toBe(0);
+    expect(out.text).toContain(blob);
+  });
+
+  it("never eats a {{sec:NAME}} ref", () => {
+    const out = maskValues("token={{sec:gh_pat}} done", [SECRET64]);
+    expect(out.text).toBe("token={{sec:gh_pat}} done");
+  });
+
+  it("stays idempotent after a windowed mask", () => {
+    const truncated = `lead ${B64_64.slice(0, 84)}`;
+    const once = scrubText(truncated, vault, { shapes: false }).text;
+    expect(scrubText(once, vault, { shapes: false }).text).toBe(once);
+  });
+
+  it("masks only the secret's own run, not trailing text in the same alphabet", () => {
+    // Extension is bounded by the alphabet, but a SPACE must stop it.
+    const out = maskValues(`${B64_64.slice(0, 84)} and then some prose here`, [SECRET64]);
+    expect(out.hits).toBe(1);
+    // "and" is entirely base64-alphabet, so only the whitespace boundary can stop
+    // the run here — that check is what keeps ordinary text readable.
+    expect(out.text).toBe("{{sec:redacted}} and then some prose here");
+  });
+});
