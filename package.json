@@ -10,7 +10,8 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:canary": "vitest run test/integration && node scripts/canary-sweep.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
