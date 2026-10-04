@@ -225,12 +225,12 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
 
   it("clears wordStart across an escape pair at a genuine word start", () => {
     // Requirement 7. `)` sets the flag, the escape must clear it; bash reads one word
-    // here (`echo y=a;#bc q d`), so `#` is text and the sq span must be recorded.
+    // here (`echo $(printf a)\;#b'c ... d'`), so `#` is text and the sq span must be recorded.
     const src = "echo $(printf a)\\;#b'c {{sec:gh_pat}} d'";
     const out = expandBash(src, resolve);
     expect(out.missing).toEqual([]);
     expect(out.command).toContain(`'"$${GH_ENV}"'`); // spliced, not bare
-    expect(out.command).not.toMatch(/'c? ?"\$[^""]*" ?d'/); // never bare inside sq
+    expect(out.command).not.toMatch(/'c? ?"\$[^"]*" ?d'/); // never bare inside sq
   });
 
   it("excludes every body when a prose apostrophe could hide a later operator", () => {
@@ -253,5 +253,69 @@ describe("expandBash — lexical contexts the first draft got wrong", () => {
   it("still blocks a heredoc operator that a real quote swallows", () => {
     const out = expandBash("echo '<<EOF'\ndon't\nEOF\necho {{sec:gh_pat}}", resolve);
     expect(out.missing).toEqual(["gh_pat"]);
+  });
+});
+
+describe("phase 2 — arithmetic, comment and paren context", () => {
+  it("cat<<EOF with NO space is still a heredoc (regression guard)", () => {
+    // The plan suggested guarding `<<` with a `wordStart` test, which would reject
+    // this because the operator follows a word character rather than whitespace.
+    // Measured: `cat<<EOF` prints its body in bash. The guard is arithmetic-context
+    // instead, so this must keep working.
+    const out = expandBash("cat<<EOF\ntoken={{sec:gh_pat}}\nEOF", resolve);
+    expect(out.command).toContain(`token=\${${GH_ENV}}`);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("$((1<<2)) is arithmetic, not a heredoc operator", () => {
+    // With the delimiter class widened, `1<<2` would otherwise parse as a heredoc
+    // whose delimiter is `2` — and the rest of the command as its body.
+    const out = expandBash("echo $((1<<2)) {{sec:gh_pat}}", resolve);
+    expect(out.command).toContain("$((1<<2))");
+    expect(out.command).toContain(`"$${GH_ENV}"`);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("a `)` closing a command substitution does NOT end the word", () => {
+    // Measured: `y=$(printf a)#c` does NOT comment in bash — the word began at `y`,
+    // so `#` is still mid-word and the ref after it must expand.
+    const out = expandBash("y=$(printf a)#c {{sec:gh_pat}}", resolve);
+    expect(out.command).toContain(`#c "$${GH_ENV}"`);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("a `)` closing a subshell DOES end the word, so `#` comments", () => {
+    // The mirror image: `(cd .)#c` comments in bash, so the ref is comment text.
+    const out = expandBash("(cd .)#c {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+    expect(out.command).toContain("{{sec:gh_pat}}");
+    expect(out.env).toEqual({});
+  });
+
+  it("an unquoted non-word delimiter body expands (bash expands unquoted bodies)", () => {
+    // Measured: `cat <<1` with `token=$MYVAR` prints the value. So the body is NOT
+    // inert and the secret IS delivered — the ref must expand as ${VAR}, not block.
+    const out = expandBash("cat <<1\ntoken={{sec:gh_pat}}\n1", resolve);
+    expect(out.command).toContain(`token=\${${GH_ENV}}`);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("a ref inside a comment is inert and blocks, never reported used", () => {
+    // bash discards comment text entirely, so expanding here would report the ref
+    // as delivered while nothing reaches the child.
+    const out = expandBash("echo hi # see {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+    expect(out.used).toEqual([]);
+    expect(out.env).toEqual({});
+  });
+
+  it("a backslash-newline leaves the parser state alone, unlike an escape pair", () => {
+    // `\` + newline does NOT clear wordStart, so the `#` after it still comments.
+    const cont = expandBash("echo x \\\n#c {{sec:gh_pat}}", resolve);
+    expect(cont.missing).toEqual(["gh_pat"]);
+    // `\#` is an escaped hash: word text, and the ref still expands.
+    const esc = expandBash("echo x \\#c {{sec:gh_pat}}", resolve);
+    expect(esc.missing).toEqual([]);
+    expect(esc.command).toContain(`"$${GH_ENV}"`);
   });
 });

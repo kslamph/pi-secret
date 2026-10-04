@@ -567,7 +567,7 @@ const GOLDENS: Golden[] = [
   {
     "name": "new: <<1 non-word delimiter (req2)",
     "input": "cat <<1\ntoken={{sec:gh_pat}}\n1\necho {{sec:gh_pat}} && echo 'x'",
-    "command": "cat <<1\ntoken=\"$__PISEC_GH_PAT_a71b5583e6c0f446\"\n1\necho \"$__PISEC_GH_PAT_a71b5583e6c0f446\" && echo 'x'",
+    "command": "cat <<1\ntoken=${__PISEC_GH_PAT_a71b5583e6c0f446}\n1\necho \"$__PISEC_GH_PAT_a71b5583e6c0f446\" && echo 'x'",
     "env": {
       "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
     },
@@ -576,7 +576,7 @@ const GOLDENS: Golden[] = [
     ],
     "missing": [],
     "block": false,
-    "note": "DEFECT (req2): the numeric delimiter `1` is rejected by the `[A-Za-z_][A-Za-z0-9_]*` charset, so the body is scanned as code and the ref is expanded (block=false). In bash `cat <<1` is a valid heredoc, so the body is inert. Phase 2 widens the delimiter class to `[^\\s|&<>();]+` (req2), recognizes `1`, excludes the body, leaves the ref literal and reports it missing (block flips false->true)."
+    "note": "RESOLVED (req2). Phase 1 rejected the numeric delimiter `1` (charset was `[A-Za-z_][A-Za-z0-9_]*`), so the body was scanned as CODE and the ref was rewritten in code form `\"$VAR\"`. Phase 2 widens the delimiter class to `[^\\s|&<>();]+`, recognizes `1`, and the body is now scanned as a heredoc body — hence `${VAR}` instead of `\"$VAR\"`. block stays false in both phases, and the phase-1 note's claim that phase 2 should flip it to true was WRONG: measured against bash, an UNQUOTED heredoc delimiter leaves the body subject to parameter expansion (`cat <<1` with `token=$MYVAR` in the body prints the value), so the body is NOT inert and correctly delivers the secret. Only the rewrite shape changed. A quoted delimiter (`<<'EOF'`) is the inert case, and that is pinned separately."
   },
   {
     "name": "new: <<E-O-F delimiter (req2)",
@@ -590,7 +590,7 @@ const GOLDENS: Golden[] = [
     ],
     "missing": [],
     "block": false,
-    "note": "DEFECT (req2): delimiter `E-O-F` (contains `-`) is rejected by the word-char charset, so the body ref is expanded (block=false). bash accepts `E-O-F` as a heredoc delimiter, so the body is inert. Phase 2 recognizes it and blocks (block flips false->true)."
+    "note": "RESOLVED (req2). `E-O-F` contains `-`, which the phase-1 charset rejected. Phase 2 accepts it and the body is scanned as a heredoc body. This expectation already recorded the `${VAR}` body form and did not change across phase 2 — the phase-1 note's claim about phase-1 output was stale. block stays false: an unquoted delimiter does not make the body inert (measured)."
   },
   {
     "name": "new: <<EOF.txt delimiter (req2)",
@@ -604,12 +604,12 @@ const GOLDENS: Golden[] = [
     ],
     "missing": [],
     "block": false,
-    "note": "DEFECT (req2): delimiter `EOF.txt` (contains `.`) is rejected by the word-char charset, so the body ref is expanded (block=false). bash accepts `EOF.txt` as a heredoc delimiter, so the body is inert. Phase 2 recognizes it and blocks (block flips false->true)."
+    "note": "RESOLVED (req2). `EOF.txt` contains `.`, which the phase-1 charset rejected. Phase 2 accepts it and the body is scanned as a heredoc body. Expectation unchanged across phase 2 — the phase-1 note's claim about phase-1 output was stale. block stays false: an unquoted delimiter does not make the body inert (measured)."
   },
   {
     "name": "new: # cat <<EOF comment operator (req4)",
     "input": "# cat <<EOF\ntoken={{sec:gh_pat}}\nEOF\necho {{sec:gh_pat}}",
-    "command": "# cat <<EOF\ntoken=${__PISEC_GH_PAT_a71b5583e6c0f446}\nEOF\necho \"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
+    "command": "# cat <<EOF\ntoken=\"$__PISEC_GH_PAT_a71b5583e6c0f446\"\nEOF\necho \"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
     "env": {
       "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
     },
@@ -618,7 +618,7 @@ const GOLDENS: Golden[] = [
     ],
     "missing": [],
     "block": false,
-    "note": "DEFECT (req4): the current scanner is comment-UNAWARE for heredocs, so the `<<EOF` on the commented operator line is still matched as a heredoc operator (pre-refactor behavior, pinned faithfully). Phase 2 (req4) makes operators inside comments inert, so this `<<EOF` will register nothing: the `token={{sec:gh_pat}}` line will no longer be a heredoc body and the ref will expand as plain code (command changes from `token=${VAR}` to `token=\"$VAR\"`). Marked so phase 2 shows this deliberate flip."
+    "note": "RESOLVED (req4). Phase 1 was comment-unaware for heredocs, so the `<<EOF` on the commented line still registered an operator. Phase 2 makes operators inside comments inert, so this registers nothing: the `token={{sec:gh_pat}}` line is no longer a heredoc body and the ref expands as plain code (`\"$VAR\"`, not `${VAR}`). The trailing `echo` still expands. Deliberate flip, exactly as the phase-1 note predicted."
   },
   {
     "name": "new: arithmetic $((1<<2)) (req3)",
@@ -647,16 +647,14 @@ const GOLDENS: Golden[] = [
   {
     "name": "new: line-continuation (balanced apostrophe, real defect)",
     "input": "echo x \\\n#don''t {{sec:gh_pat}}",
-    "command": "echo x \\\n#don''t \"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
-    "env": {
-      "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
-    },
-    "used": [
+    "command": "echo x \\\n#don''t {{sec:gh_pat}}",
+    "env": {},
+    "used": [],
+    "missing": [
       "gh_pat"
     ],
-    "missing": [],
-    "block": false,
-    "note": "DEFECT (also-owed / req4): `\\<newline>` joins the next line in the SAME parser state, so `#don''t` is a comment and the ref is text bash discards. Current impl expands it (block=false) because the `\\` clears wordStart (Task 4 req7 blanket clear) and the balanced apostrophes avoid fail-closed. Phase 2 leaves the ref literal + blocks (block flips false->true). The brief's literal `echo x \\<newline>#don't` shape coincidentally blocks today — the lone apostrophe trips fail-closed for the WRONG reason — see the 'odd apostrophe' golden."
+    "block": true,
+    "note": "RESOLVED (also-owed / req4). A backslash-newline is not an escape pair: bash deletes both characters and continues in the SAME parser state, so the `\\` must leave `wordStart` alone and `#don''t` opens a comment. The ref is comment text bash discards, so it is left literal and reported missing. Phase 1 expanded it (block=false) because the `\\` cleared `wordStart` (Task 4 req7 blanket clear) and the balanced apostrophes avoided fail-closed. Predicted flip false->true; observed flip false->true."
   },
   {
     "name": "new: public-key heredoc unquoted",
@@ -689,44 +687,38 @@ const GOLDENS: Golden[] = [
   {
     "name": "new: x>#f redirection boundary",
     "input": "echo x>#{{sec:gh_pat}}",
-    "command": "echo x>#\"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
-    "env": {
-      "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
-    },
-    "used": [
+    "command": "echo x>#{{sec:gh_pat}}",
+    "env": {},
+    "used": [],
+    "missing": [
       "gh_pat"
     ],
-    "missing": [],
-    "block": false,
-    "note": "DEFECT (also-owed / req4): `>` then `#` is a comment (bash exits 2, creates no file), so the ref is comment text. Current impl expands it (block=false). Phase 2 treats the ref as comment text: leaves it literal + blocks (block flips false->true)."
+    "block": true,
+    "note": "RESOLVED (also-owed / req4). `>` then `#` is a comment (measured: bash exits 2 and creates no file), so the ref is comment text bash discards: left literal and blocked. Phase 1 expanded it (block=false). Predicted flip false->true; observed flip false->true."
   },
   {
     "name": "new: x<#f redirection boundary",
     "input": "echo x<#{{sec:gh_pat}}",
-    "command": "echo x<#\"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
-    "env": {
-      "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
-    },
-    "used": [
+    "command": "echo x<#{{sec:gh_pat}}",
+    "env": {},
+    "used": [],
+    "missing": [
       "gh_pat"
     ],
-    "missing": [],
-    "block": false,
-    "note": "DEFECT (also-owed / req4): `<` then `#` is a comment, so the ref is comment text. Current impl expands it (block=false). Phase 2 leaves literal + blocks (block flips false->true)."
+    "block": true,
+    "note": "RESOLVED (also-owed / req4). `<` then `#` is a comment, so the ref is comment text: left literal and blocked. Phase 1 expanded it (block=false). Predicted flip false->true; observed flip false->true."
   },
   {
     "name": "new: x<<<#f redirection boundary",
     "input": "echo x<<<#{{sec:gh_pat}}",
-    "command": "echo x<<<#\"$__PISEC_GH_PAT_a71b5583e6c0f446\"",
-    "env": {
-      "__PISEC_GH_PAT_a71b5583e6c0f446": "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
-    },
-    "used": [
+    "command": "echo x<<<#{{sec:gh_pat}}",
+    "env": {},
+    "used": [],
+    "missing": [
       "gh_pat"
     ],
-    "missing": [],
-    "block": false,
-    "note": "DEFECT (also-owed / req4): `<<<` then `#` is a comment, so the ref is comment text. Current impl expands it (block=false). Phase 2 leaves literal + blocks (block flips false->true)."
+    "block": true,
+    "note": "RESOLVED (also-owed / req4). `<<<` then `#` is a comment, so the ref is comment text: left literal and blocked. Phase 1 expanded it (block=false). Predicted flip false->true; observed flip false->true."
   },
   {
     "name": "new: public-key non-word delimiter (req2 mis-lex)",
@@ -740,7 +732,7 @@ const GOLDENS: Golden[] = [
     ],
     "missing": [],
     "block": false,
-    "note": "DEFECT (req2) — the 'public-key body line currently mis-lexes' case from the brief. The delimiter `id_rsa.pub` is rejected (contains `.`), so the public-key body — including the ref — is scanned as code and the ref is expanded (block=false). Phase 2 recognizes the non-word delimiter, excludes the body, and blocks (block flips false->true)."
+    "note": "RESOLVED (req2). The delimiter `id_rsa.pub` contains `.`, so phase 1's `[A-Za-z_][A-Za-z0-9_]*` class rejected it and the public-key body was scanned as code. Phase 2 accepts it, so the body is scanned as a heredoc body and the ref is rewritten as `${VAR}`. block stays false: measured against bash, an unquoted delimiter leaves the body subject to parameter expansion, so this body is NOT inert. The phase-1 note's prediction that phase 2 would block was wrong on that point — same correction as the `<<1` golden."
   }
 ];
 
@@ -762,16 +754,37 @@ describe("bash scanner golden corpus (phase-1 baseline — must stay identical a
   }
 });
 
-describe("goldens encoding known defects (phase-2 deliberate-flip targets)", () => {
-  const defects = GOLDENS.filter((g) => g.note);
-  it(`documents ${defects.length} known defects`, () => {
-    expect(defects.length).toBeGreaterThan(0);
+describe("goldens whose notes document a defect and how phase 2 resolved it", () => {
+  const noted = GOLDENS.filter((g) => g.note);
+  it(`documents ${noted.length} defect notes`, () => {
+    expect(noted.length).toBeGreaterThan(0);
   });
-  for (const g of defects) {
-    it(`${g.name} — ${g.note}`, () => {
-      // Pure documentation of intent; the binding assertion is the baseline
-      // pin in the suite above. Phase 2 is expected to flip command/block here.
-      expect(g.block).toBe(false); // today these wrongly do NOT block
-    });
-  }
+
+  // The binding per-golden assertion is the pin in the suite above. This block
+  // exists so each note is visible in test output and so the documented outcome is
+  // itself checked: any note that promised a block flip must now block.
+  //
+  // Phase 1 asserted `block === false` for every noted golden ("today these wrongly
+  // do NOT block"). That was true then and is the opposite of true now, so it was
+  // replaced rather than kept — an assertion that is always-false-in-the-future is
+  // worse than no assertion.
+  it("every golden whose note predicted a block flip now blocks", () => {
+    const predicted = noted.filter((g) => /flip(s)? false->true/.test(g.note ?? ""));
+    expect(predicted.length).toBeGreaterThan(0);
+    for (const g of predicted) {
+      expect(g.block, `${g.name} promised a block flip`).toBe(true);
+      expect(g.missing, `${g.name} promised to report the ref missing`).not.toHaveLength(0);
+    }
+  });
+
+  // The other noted goldens were unquoted delimiters, whose bodies bash still
+  // expands — measured. They must NOT block, or the scanner would be refusing to
+  // deliver a secret that bash would have delivered correctly.
+  it("unquoted non-word delimiters do not block (their bodies expand in bash)", () => {
+    for (const name of ["<<1 non-word delimiter (req2)", "<<E-O-F delimiter (req2)", "<<EOF.txt delimiter (req2)", "public-key non-word delimiter (req2 mis-lex)"]) {
+      const g = GOLDENS.find((x) => x.name.includes(name));
+      expect(g, name).toBeDefined();
+      expect(g!.block, name).toBe(false);
+    }
+  });
 });

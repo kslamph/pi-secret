@@ -48,8 +48,19 @@ export interface HeredocRegion {
  */
 const WORD_BOUNDARY = /[( )<>;|&\t\n]/;
 
+/**
+ * Phase 2 (req 2): a heredoc delimiter is any unquoted WORD, not just an
+ * identifier. Measured against bash: `cat <<1`, `cat <<E-O-F` and `cat <<EOF.txt`
+ * all print their bodies. A narrow `[A-Za-z_][A-Za-z0-9_]*` class rejected all three,
+ * so those bodies were scanned as code and the ref inside them was expanded —
+ * the silent-non-delivery class again, just via a different delimiter.
+ *
+ * The stop set must contain every character bash treats as an operator/separator,
+ * so it can never swallow `<`, `|`, `&`, `;`, `(`, `)` or whitespace.
+ */
+const DELIM_STOP = /[\s|&<>();]/;
+
 /** Matches `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\\EOF` at a word position. */
-const HEREDOC_RE = /<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3/g;
 
 /**
  * Single-pass bash lexical scanner (Task 15 phase 1 extract).
@@ -84,12 +95,22 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
   // matching the flat state machine of the code this replaces.
   type QuoteFrame = { kind: "sq" | "dq" | "ansq" | "loc"; open: number };
   const qstack: QuoteFrame[] = [];
+  /**
+   * Phase 2 (req 3 + the "two different `)`" item): the three ways a `(` opens
+   * mean different things, and a flat character set cannot tell them apart.
+   *  - `arith`     — `$(( … ))`; a `<<` inside is a SHIFT, not a heredoc operator.
+   *  - `subshell`  — `( … )`; the closing `)` ends a word, so `#` after it comments.
+   *  - `cmdsubst`  — `$( … )`; the closing `)` does NOT end a word, because the word
+   *                  began before the `$(` — measured: `y=$(printf a)#c` does not
+   *                  comment, while `(cd .)#c` does.
+   */
+  const parens: Array<"subshell" | "cmdsubst" | "arith"> = [];
+  const inArith = (): boolean => parens.includes("arith");
   /** Next usable heredoc body start (after the most recent terminator line). */
   let cursor = -1;
 
   let wordStart = true;
-  /** True while scanning the tail of a comment line: comment text, but heredoc
-   *  operators on the line are still detected (current behavior is preserved). */
+  /** True while scanning the tail of a comment line. */
   let inComment = false;
   let i = 0;
 
@@ -157,19 +178,10 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
         i++;
         continue;
       }
-      // Comment text: no quote state, but `<<` still opens a heredoc (current
-      // behavior is comment-unaware).
-      if (ch === "<" && i + 1 < n && text[i + 1] === "<") {
-        const next = tryHeredocOp(i);
-        if (next !== null) {
-          i = next;
-          wordStart = false;
-          continue;
-        }
-        i += 2;
-        wordStart = false;
-        continue;
-      }
+      // Phase 2 (req 4): comment text is INERT. bash comments out the rest of the
+      // line, so a `<<` on it registers no operator and opens no body. Phase 1
+      // honoured it here; that is exactly the behaviour being removed. Measured:
+      // `# cat <<EOF` runs line 2 as a command and prints `done`.
       i++;
       continue;
     }
@@ -257,17 +269,39 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
         wordStart = false;
         continue;
       }
-      // $ followed by a regular character (incl. `(` for $(…)): word text.
+      if (nx === "(") {
+        if (text[i + 2] === "(") {
+          // `$(( … ))` arithmetic. Its `<<` is a shift operator, so nothing inside
+          // may be read as a heredoc. Two frames because bash writes two open parens.
+          parens.push("arith", "arith");
+          i += 3;
+        } else {
+          parens.push("cmdsubst");
+          i += 2;
+        }
+        wordStart = false;
+        continue;
+      }
+      // $ followed by a regular character: word text.
       i++;
       wordStart = false;
       continue;
     }
     if (ch === "\\" && i + 1 < n) {
+      // A LINE CONTINUATION is not an escape pair. bash deletes both characters and
+      // carries on in the SAME parser state, so `wordStart` must be left untouched;
+      // a normal `\<char>` is word text and clears it. Without this split,
+      // `echo x \` + newline + `#don't` misses the comment and splices a ref into
+      // text bash discards — measured, it prints `x`, same as `echo x #don't`.
+      if (text[i + 1] === "\n") {
+        i += 2;
+        continue;
+      }
       i += 2; // escape pair: \<char> is word text, clears wordStart
       wordStart = false;
       continue;
     }
-    if (ch === "#" && wordStart) {
+    if (ch === "#" && wordStart && !inArith()) {
       // Comment to end of line. The newline itself stays in code state, and the
       // rest of the line is still scanned (comment mode) so a `<<` on it is seen
       // — preserving the current comment-unaware heredoc behavior.
@@ -282,7 +316,7 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
       i++; // move past '#'; remaining line chars scanned in comment mode
       continue;
     }
-    if (ch === "<" && i + 1 < n && text[i + 1] === "<") {
+    if (ch === "<" && i + 1 < n && text[i + 1] === "<" && !inArith()) {
       const next = tryHeredocOp(i);
       if (next !== null) {
         i = next;
@@ -291,6 +325,21 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
       }
       i += 2;
       wordStart = false;
+      continue;
+    }
+    if (ch === "(") {
+      parens.push("subshell");
+      wordStart = true;
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      // The two `)` are NOT interchangeable. Closing a subshell ends a word, so a
+      // following `#` comments (measured: `(cd .)#c` comments). Closing a command
+      // substitution or arithmetic does not — the word began before the `$(`, so
+      // `#` is still mid-word (measured: `y=$(printf a)#c` does NOT comment).
+      if (parens.pop() === "subshell") wordStart = true;
+      i++;
       continue;
     }
     if (ch != null && WORD_BOUNDARY.test(ch)) {
@@ -320,12 +369,12 @@ export function scan(text: string): { lex: BashLex; heredocs: HeredocRegion[] } 
 
 /**
  * Parses a heredoc operator starting at `<<` (text[p] === text[p+1] === "<").
- * Mirrors `<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3` so behavior is
- * identical to the regex it replaces: optional `-`, optional whitespace, an
- * optional escaping `\`, an optional opening quote, the delimiter word, and a
- * closing quote matching the opening one. Returns the delimiter, whether it is
- * inert (quoted/escaped), and the token length consumed (including a closing
- * quote when present).
+ * Mirrors `<<(-?)[ \t]*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\3` — optional `-`,
+ * optional whitespace, an optional escaping `\`, an optional opening quote, the
+ * delimiter word, and a closing quote matching the opening one — except that the
+ * delimiter class is widened to any unquoted word (phase 2, req 2).
+ * Returns the delimiter, whether it is inert (quoted/escaped), and the token length
+ * consumed (including a closing quote when present).
  */
 function parseHeredocOp(
   text: string,
@@ -350,9 +399,18 @@ function parseHeredocOp(
     j++;
   }
   const dStart = j;
-  if (!(j < text.length && /[A-Za-z_]/.test(text[j] ?? ""))) return null;
-  j++;
-  while (j < text.length && /[A-Za-z0-9_]/.test(text[j] ?? "")) j++;
+  // Phase 2 (req 2): ANY unquoted word is a delimiter. The old
+  // `[A-Za-z_][A-Za-z0-9_]*` class rejected `1`, `E-O-F` and `EOF.txt`, all of
+  // which bash honours — their bodies were then scanned as code and any ref inside
+  // was expanded instead of being reported unusable.
+  //
+  // The stop set MUST also include the delimiter's own quote when one is open.
+  // Without that, `<<'EOF'` scans straight through the closing `'` (which is not
+  // an operator character), yielding the delimiter `EOF'` and then failing the
+  // closing-quote check — i.e. quoted heredocs would stop being recognised at all.
+  const isStop = (ch: string): boolean => DELIM_STOP.test(ch) || (quote !== null && ch === quote);
+  if (!(j < text.length && !isStop(text[j] ?? ""))) return null;
+  while (j < text.length && !isStop(text[j] ?? "")) j++;
   const delimiter = text.slice(dStart, j);
   const close = text[j];
   if (quote) {
@@ -426,9 +484,21 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
     .filter((s) => s.kind === "ansq")
     .map((s) => ({ start: s.start, end: s.end }));
   const loc: Interval[] = spans.filter((s) => s.kind === "loc").map((s) => ({ start: s.start, end: s.end }));
+  const comments: Interval[] = spans
+    .filter((s) => s.kind === "comment")
+    .map((s) => ({ start: s.start, end: s.end }));
   const edits: Array<{ start: number; end: number; text: string }> = [];
 
   for (const ref of findRefs(command)) {
+    // A ref inside a comment is text bash DISCARDS — the command runs without it
+    // ever being delivered. Expanding it would report the ref as `used` while
+    // nothing reaches the child, which is exactly the silent-non-delivery failure:
+    // the model believes it passed the token and has no reason to look again. Report
+    // it missing so the caller blocks.
+    if (comments.some((c) => ref.start >= c.start && ref.end <= c.end)) {
+      if (!missing.includes(ref.name)) missing.push(ref.name);
+      continue;
+    }
     // A quoted-delimiter heredoc body performs no expansion, so the ref cannot
     // be substituted there. Record it as unusable rather than silently dropping
     // it: the caller blocks on `missing` instead of running a command that would
