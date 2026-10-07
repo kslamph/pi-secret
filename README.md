@@ -2,7 +2,7 @@
 
 pi-secure is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent that keeps credentials out of everything an LLM endpoint can see — request bodies, session files, transcripts, exports — while letting the model *use* those credentials in shell commands and tool calls without friction. You should never have to paste a token into a conversation, and if you do, it should not end up in the conversation.
 
-> **Status:** the extension is wired and the canary sweep passes — `npm test` (381 tests) and
+> **Status:** the extension is wired and the canary sweep passes — `npm test` and
 > `npm run test:canary` (7 end-to-end scenarios plus a filesystem sweep) are green, and the vault,
 > capture, injection and scrubbing paths all run inside pi. Known gaps are listed under **Status and
 > known gaps** below; read them before relying on this for anything you cannot afford to leak.
