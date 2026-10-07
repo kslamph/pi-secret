@@ -161,6 +161,34 @@ describe("Vault", () => {
     expect(real.names()).toEqual(["a_b"]);
   });
 
+  it("keeps a non-colliding rename on the non-throwing path", () => {
+    // The pair above only pins the throw. rename() is PARTIALLY throwing: false for
+    // unknown/invalid/taken names, a thrown Error only for an env-var collision —
+    // so a guard that over-fired (rejecting an ordinary rename because the entry
+    // collides with its OWN current name) would satisfy that test while making
+    // /sec rename useless. Both mutations are covered, one test each: delete
+    // rename()'s guard and only the pair above fails; drop the `ignore` argument
+    // so the guard sees the entry's own name, and only this one fails.
+    // (Verified by mutating the source, not by inspection.)
+    const flat = (n: string) =>
+      n === "second" || n === "third" ? "__PISEC_FLAT_0000000000000000" : `__PISEC_${n.toUpperCase()}`;
+    const w = new Vault("t", flat);
+    w.add("first", GH, "prompt");
+    w.add("second", K, "paste");
+    expect(() => w.rename("second", "third")).not.toThrow();
+    expect(w.names()).toEqual(["first", "third"]);
+  });
+
+  it("hands out a frozen entry so its name cannot drift from its key", () => {
+    v.add("gh_pat", GH, "prompt");
+    const entry = v.get("gh_pat");
+    expect(entry).toBeDefined();
+    expect(() => {
+      (entry as { name: string }).name = "renamed";
+    }).toThrow();
+    expect(v.get("gh_pat")?.name).toBe("gh_pat");
+  });
+
   it("accepts punctuation-variant names that really do differ", () => {
     v.add("a-b", GH, "prompt");
     expect(() => v.add("a_b", K, "paste")).not.toThrow();

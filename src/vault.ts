@@ -80,8 +80,16 @@ export class Vault {
     return toPublic(entry);
   }
 
+  /**
+   * A FROZEN COPY, never the live entry. The entry's `name` is the map key it was
+   * stored under, and every collision guard computes over keys, so a caller that
+   * could mutate `entry.name` would desynchronise the two: the entry would claim
+   * a name the guards never see. Not a wrong-credential vector, but it is a
+   * lie the rest of the code would believe. Callers only ever read fields.
+   */
   get(name: string): VaultEntry | undefined {
-    return this.#map.get(name);
+    const entry = this.#map.get(name);
+    return entry && Object.freeze({ ...entry });
   }
   has(name: string): boolean {
     return this.#map.has(name);
