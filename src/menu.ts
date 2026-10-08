@@ -45,6 +45,11 @@ export interface Row {
   separatorBefore?: boolean;
 }
 
+/** Only secret rows share the name column; action rows are not names. */
+function isEntryRow(row: Row): boolean {
+  return row.action.kind === "entry";
+}
+
 function ago(ts: number, now: number): string {
   const mins = Math.max(0, Math.round((now - ts) / 60_000));
   if (mins < 1) return "just now";
@@ -91,10 +96,13 @@ export function secretRows(
   });
   rows.push({
     action: { kind: "toggle" },
-    // The row states the ACTION it performs, not the current state, so there is no second
-    // lookup and no ambiguity about what pressing enter will do.
-    label: options.enabled ? "Disable for this session" : "Enable for this session",
-    detail: options.enabled ? "t · clears the values" : "t",
+    // The row names the SUBJECT as well as the action. A row reading "Enable for this
+    // session" inside a list of per-secret items was read as being about those items — it is
+    // about pi-secure itself, and the consequence differs per direction, so both are stated.
+    label: options.enabled
+      ? "Turn pi-secure off (clears these secrets)"
+      : "Turn pi-secure on",
+    detail: "t",
   });
   return rows;
 }
@@ -121,10 +129,14 @@ export function selectList(
   title: string,
   rows: readonly Row[],
   shortcuts: Record<string, SecAction> = {},
+  subtitle?: string,
 ): Promise<SecAction | null> {
   if (rows.length === 0) return Promise.resolve(null);
   return ctx.ui.custom<SecAction | null>((tui, theme, _kb, done) => {
     let cursor = 0;
+    // Status is rendered in the warning colour when the extension is off, so the state is
+    // legible without reading it.
+    const enabled_ = !subtitle?.startsWith("OFF");
     return {
       render(width: number): string[] {
         const w = Math.max(24, width);
@@ -132,17 +144,28 @@ export function selectList(
         // name overflow pushes the detail column sideways and destroys the alignment that
         // makes the list scannable — the one thing this menu exists for. The full name is
         // still shown in the sub-menu title and in `/sec list`.
-        const column = Math.min(24, Math.max(8, ...rows.map((r) => r.label.length)));
+        // Only ENTRY rows share the name column. An action row is not a name, and truncating
+        // "Turn pi-secure off (clears these secrets)" to "Turn pi-secure off (cle…" loses the
+        // part that says what will happen.
+        const column = Math.min(24, Math.max(8, ...rows.filter(isEntryRow).map((r) => r.label.length)));
         const lines: string[] = [];
         const add = (line = "") => lines.push(truncateToWidth(line, w));
         add(theme.fg("accent", "─".repeat(w)));
         add(` ${theme.fg("accent", theme.bold(title))}`);
+        if (subtitle) {
+          add();
+          add(` ${theme.fg(enabled_ ? "text" : "warning", subtitle)}`);
+        }
         add();
         rows.forEach((row, i) => {
           if (row.separatorBefore) add();
           const pointer = i === cursor ? theme.fg("accent", "❯ ") : "  ";
-          const padded = row.label.length > column ? `${row.label.slice(0, column - 1)}…` : row.label;
-          const name = truncateToWidth(padded, column);
+          const name = isEntryRow(row)
+            ? truncateToWidth(
+                row.label.length > column ? `${row.label.slice(0, column - 1)}…` : row.label,
+                column,
+              )
+            : truncateToWidth(row.label, Math.max(12, w - (row.detail?.length ?? 0) - 6));
           const detail = row.detail ? theme.fg("dim", row.detail) : "";
           const gap = Math.max(1, w - name.length - detail.length - 4);
           add(` ${pointer}${name}${" ".repeat(gap)}${detail}`);
@@ -176,6 +199,21 @@ export function selectList(
       },
     };
   });
+}
+
+/**
+ * The one-line state of the extension, shown above the list.
+ *
+ * This is the thing that was missing: the toggle row alone could be read as describing the
+ * list's contents, because it sat in a list of per-secret items. Stating the state at the top
+ * and the action at the bottom separates "what is true now" from "what pressing this does".
+ */
+export function statusLine(enabled: boolean, count: number): string {
+  if (!enabled) {
+    return "OFF · refs do NOT expand · no values stored";
+  }
+  const noun = count === 1 ? "1 secret" : `${count} secrets`;
+  return `ON · refs expand · output scrubbed · ${noun} this session`;
 }
 
 /** True when a UI capable of showing the menu exists. */

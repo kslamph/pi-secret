@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { entryRows, secretRows, selectList, type SecAction, type Row } from "../src/menu.ts";
+import { entryRows, secretRows, selectList, statusLine, type Row } from "../src/menu.ts";
 import { Vault, type PublicEntry } from "../src/vault.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -71,13 +71,15 @@ describe("the /sec list", () => {
     expect(rows[1]!.detail).toContain("prompt");
   });
 
-  it("always offers Add, and a toggle that states the action it performs", () => {
+  it("always offers Add, and a toggle that names BOTH the subject and the consequence", () => {
+    // "Enable for this session" inside a list of per-secret items was read as being about
+    // those items. It is about pi-secure itself, and the two directions have different
+    // consequences, so the label states the subject and spells the consequence out.
     const on = secretRows([], { enabled: true, now: NOW });
     expect(on.map((r) => r.action.kind)).toEqual(["add", "toggle"]);
-    expect(on[1]!.label).toBe("Disable for this session");
-    expect(on[1]!.detail).toContain("clears the values");
+    expect(on[1]!.label).toBe("Turn pi-secure off (clears these secrets)");
     const off = secretRows([], { enabled: false, now: NOW });
-    expect(off[1]!.label).toBe("Enable for this session");
+    expect(off[1]!.label).toBe("Turn pi-secure on");
   });
 
   it("is a single list even with nothing in it — the user always has somewhere to go", () => {
@@ -90,6 +92,17 @@ describe("the /sec list", () => {
     const rows = secretRows([entry("a"), entry("a_much_longer_name")], { enabled: true, now: NOW });
     const heads = rows.slice(0, 2).map((r) => r.label.length);
     expect(heads[0]).toBe(heads[1]);
+  });
+
+  it("never truncates an ACTION row to the name column width", () => {
+    // "Turn pi-secure off (clears these secrets)" truncated to "Turn pi-secure off (cle…"
+    // loses exactly the part that says what will happen — which is the part that matters.
+    const rows = secretRows([entry("gh_pat")], { enabled: true, now: NOW });
+    const toggle = rows.at(-1)!;
+    const { ui, rendered } = fakeUi([["\x1b"]]);
+    void selectList({ ui } as never, "t", rows);
+    const line = rendered.find((l) => l.includes("Turn pi-secure"));
+    expect(line).toContain(toggle.label);
   });
 
   it("keeps the detail column aligned when a name is longer than the column", () => {
@@ -105,6 +118,25 @@ describe("the /sec list", () => {
       .map((l) => l.search(/ghp_|sha256/));
     expect(detailStarts.length).toBeGreaterThanOrEqual(2);
     expect(new Set(detailStarts).size).toBe(1);
+  });
+});
+
+describe("the status line above the list", () => {
+  it("states the extension's state, not the list's contents", () => {
+    // The row alone could be read as describing the entries; the status line at the top is
+    // what separates "what is true now" from "what pressing this does".
+    expect(statusLine(true, 3)).toMatch(/^ON .*refs expand.*3 secrets/);
+    expect(statusLine(true, 1)).toContain("1 secret this session");
+    expect(statusLine(false, 0)).toBe("OFF · refs do NOT expand · no values stored");
+  });
+
+  it("is rendered above the rows, not buried in them", async () => {
+    const rows = secretRows([entry("gh_pat")], { enabled: false, now: NOW });
+    const { ui, rendered } = fakeUi([["\x1b"]]);
+    void selectList({ ui } as never, "t", rows, {}, statusLine(false, 0));
+    const text = rendered.join("\n");
+    expect(text).toContain("OFF");
+    expect(text.indexOf("OFF")).toBeLessThan(text.indexOf("gh_pat"));
   });
 });
 

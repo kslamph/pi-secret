@@ -30,15 +30,27 @@ subcommand:
 ```
 
 ```
-─ pi-secure — this session only ─────────────────────────────
+─ pi-secure — this session only ──────────────────────────────
 
-  ❯ gh_pat        ghp_A1b2…Q7R8 · len 40 · paste · 2m ago
-    db_url        sha256:a1b2c3d4 · len 41 · prompt · 1h ago
+  ON · refs expand · output scrubbed · 2 secrets this session
 
-    Add a secret…                                        a
-    Disable for this session                            t · clears the values
+  ❯ gh_pat                    ghp_A1b2…Q7R8 · len 40 · paste · 2m ago
+    db_url                    sha256:a1b2c3d4 · len 41 · prompt · 1h ago
+
+    Add a secret…                                              a
+    Turn pi-secure off (clears these secrets)                  t
 
  ↑/↓ move · enter select · a/t shortcuts · esc close
+```
+
+The line under the title is **pi-secure's state**, not the list's contents — it is deliberately
+separate from the toggle at the bottom, which is the action. With the switch off the panel says so:
+
+```
+  OFF · refs do NOT expand · no values stored
+
+    Add a secret…                                              a
+    Turn pi-secure on                                           t
 ```
 
 Enter on a secret opens what you can do with it:
@@ -51,9 +63,9 @@ Enter on a secret opens what you can do with it:
 | Back | `esc` | |
 
 `Add a secret…` asks for a name, then shows the masked prompt where every character renders as
-`•`; the length and preview are shown on confirm. `Disable for this session` (`t`) stops ref
-injection and capture and **clears the values**; `Enable` re-enables the mechanism but does not
-restore them.
+`•`; the length and preview are shown on confirm. `Turn pi-secure off` (`t`) stops ref injection
+and capture and **clears the values**; turning it back on re-enables the mechanism but does not
+restore them, so anything added while it was off says so when it is stored.
 
 Without a terminal to draw a menu in (headless, scripted), `/sec` prints the same list as text.
 The argument form still works everywhere and is the escape hatch:

@@ -4,7 +4,7 @@ import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
 import { setEnabled } from "./state.ts";
 import { secretLabel } from "./preview.ts";
-import { canShowMenu, entryRows, secretRows, selectList, type SecAction } from "./menu.ts";
+import { canShowMenu, entryRows, secretRows, selectList, statusLine } from "./menu.ts";
 import { isEnabled } from "./state.ts";
 import type { PublicEntry } from "./vault.ts";
 
@@ -56,7 +56,11 @@ export async function runSecCommand(
         await runSecMenu(ctx, vault);
         return;
       }
-      ctx.ui.notify(`${formatSecretList(vault.entries())}\n${SEC_USAGE}`, "info");
+      const off = !isEnabled();
+      const header = off
+        ? "pi-secure is OFF for this session — refs do not expand and no values are stored."
+        : `pi-secure is ON — ${vault.size()} secret(s) this session.`;
+      ctx.ui.notify(`${header}\n${formatSecretList(vault.entries())}\n${SEC_USAGE}`, "info");
       return;
 
     case "help":
@@ -188,6 +192,7 @@ export async function runSecMenu(ctx: ExtensionCommandContext, vault: Vault): Pr
       "pi-secure — this session only",
       secretRows(vault.entries(), { enabled: isEnabled() }),
       { a: { kind: "add" }, t: { kind: "toggle" } },
+      statusLine(isEnabled(), vault.size()),
     );
     if (!choice) return;
     if (choice.kind === "add") {
@@ -272,7 +277,14 @@ async function addViaMenu(ctx: ExtensionCommandContext, vault: Vault): Promise<v
   }
   try {
     const entry = vault.add(name, value, "prompt");
-    ctx.ui.notify(`captured sec:${entry.name} · ${labelOf(entry)} · len ${entry.length} · this session only`, "info");
+    // Storing a secret while injection is off produces one that cannot be used, and the user
+    // would only find out at the point of use. Say so at the point of storage instead.
+    ctx.ui.notify(
+      isEnabled()
+        ? `captured sec:${entry.name} · ${labelOf(entry)} · len ${entry.length} · this session only`
+        : `stored sec:${entry.name} · ${labelOf(entry)} · but pi-secure is OFF, so {{sec:${entry.name}}} will NOT expand until you turn it on`,
+      isEnabled() ? "info" : "warning",
+    );
   } catch (error) {
     ctx.ui.notify(`not stored: ${error instanceof Error ? error.message : String(error)}`, "error");
   }
