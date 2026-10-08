@@ -60,6 +60,9 @@ provider implementations invoke `options.onPayload` but the faux provider does n
 injects that callback itself — otherwise `before_provider_request` would never run under test and the
 central claim above would be asserted by nothing.
 
+Also working now: `{{sec:NAME}}` completes in the editor from the vault (names only), and a bash
+command that would write a ref to a file warns **you** — never the model — while still running.
+
 Known gaps, in rough order of how much they should worry you:
 
 1. **`read`/`grep` on a credential file sends raw secrets to the endpoint** by default. This is the
