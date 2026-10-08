@@ -63,6 +63,16 @@ central claim above would be asserted by nothing.
 Also working now: `{{sec:NAME}}` completes in the editor from the vault (names only), and a bash
 command that would write a ref to a file warns **you** — never the model — while still running.
 
+### What is actually load-bearing
+
+`context`, `message_end` and `tool_result` are the guarantee: they fire on every request and
+before anything is persisted. `before_provider_request` is an **extra, provider-dependent** layer —
+pi-ai invokes it from inside each provider's own api implementation, and pi-secure measures whether
+it actually ran (it tells you once if a provider never invokes it, rather than degrading silently).
+
+spec §3's table of pi internals is executable: `test/mechanics.test.ts` asserts each one, so a pi
+upgrade that moves something fails by name instead of surfacing later as a mystery.
+
 Known gaps, in rough order of how much they should worry you:
 
 1. **`read`/`grep` on a credential file re-opens the hole** if you turn the flag off. Masking is
@@ -80,7 +90,12 @@ Known gaps, in rough order of how much they should worry you:
    context, and subshell-vs-command-substitution `)` are all handled by the single-pass scanner.
 4. **`!` user-bash pastes are not captured** (known hole). `/export` round-trip is now covered by
    an integration test that exports the real session to HTML and greps the payload.
-5. No defense against an actively hostile endpoint — see the threat model below.
+5. **A child process's environment is readable by any process of the same user.** `bash` already
+   hands the model your user's full read access (`~/.ssh`, `~/.aws/credentials`, pi's own
+   `auth.json`), so this is not a new hole — but it belongs in the record: the value is delivered
+   through the child's environment, which is `owner`-readable at `/proc/<pid>/environ` for as long
+   as the command runs. A fd-based handoff would avoid it and needs spawn support from pi.
+6. No defense against an actively hostile endpoint — see the threat model below.
 
 ## Explicit threat model
 
