@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Vault } from "../src/vault.ts";
-import { looksCredentialish, maskShapes, maskValues, scrubDeep, scrubText } from "../src/scrub.ts";
+import { maskShapes, maskValues, scrubDeep, scrubText } from "../src/scrub.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 const DB = "postgres://admin:s3cr3t@db.internal:5432/app";
@@ -283,16 +283,6 @@ describe("scrubDeep", () => {
   it("preserves non-string leaf types", () => {
     const out = scrubDeep({ a: 1, b: true, c: ["x", 2] }, vault);
     expect(out.value).toEqual({ a: 1, b: true, c: ["x", 2] });
-  });
-});
-
-describe("looksCredentialish", () => {
-  it("flags entropy-bearing strings", () => {
-    expect(looksCredentialish("ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8")).toBe(true);
-  });
-  it("does not flag git SHAs or prose", () => {
-    expect(looksCredentialish("4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c")).toBe(false);
-    expect(looksCredentialish("the quick brown fox jumps over the lazy dog")).toBe(false);
   });
 });
 

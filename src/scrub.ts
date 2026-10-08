@@ -1,4 +1,5 @@
 import { MIN_SCRUBABLE_LENGTH, derivedForms } from "./refs.ts";
+import { isDigestShaped } from "./entropy.ts";
 
 export interface SecretProvider {
   values(): string[];
@@ -96,13 +97,6 @@ const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[
  * fully visible to a logging endpoint. Only a candidate that IS entirely a
  * digest-shaped token is exempt.
  */
-const DENY_SOURCES = [
-  "[0-9a-f]{40}", // git SHA-1
-  "[0-9a-f]{64}", // sha256 digest
-  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", // uuid
-  "[0-9a-f]{7}", // short git SHA
-];
-const DENY_ANCHORED = new RegExp(`^(?:${DENY_SOURCES.join("|")})$`, "i");
 
 const SHAPE_RE = new RegExp(`(?:${PEM_RE}|${JWT_RE}|${PREFIX_RE}|${KV_RE})`, "gi");
 
@@ -115,32 +109,6 @@ const SHAPE_RE = new RegExp(`(?:${PEM_RE}|${JWT_RE}|${PREFIX_RE}|${KV_RE})`, "gi
  */
 const WS = /[ \t\n\r\f\v]/;
 const WHITESPACE_RE = new RegExp(WS.source, "g");
-
-/** Whole-candidate exemption — see DENY_SOURCES for why this must not overlap-match. */
-function isDenied(candidate: string): boolean {
-  return DENY_ANCHORED.test(candidate);
-}
-
-export function shannonEntropy(s: string): number {
-  if (!s.length) return 0;
-  const freq = new Map<string, number>();
-  for (const ch of s) freq.set(ch, (freq.get(ch) ?? 0) + 1);
-  let h = 0;
-  for (const n of freq.values()) {
-    const p = n / s.length;
-    h -= p * Math.log2(p);
-  }
-  return h;
-}
-
-export function looksCredentialish(text: string): boolean {
-  const t = text.trim();
-  if (t.length < 20) return false;
-  if (DENY_ANCHORED.test(t)) return false; // same anchored exemption, no recompile per call
-  if (/^https?:\/\//i.test(t) || /^[A-Za-z0-9._/-]+$/.test(t) && t.includes("/")) return false;
-  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9\s]/].filter((r) => r.test(t)).length;
-  return classes >= 2 && shannonEntropy(t) > 3.6;
-}
 
 /** Longest-first so a containing secret wins over a contained one. */
 function byLengthDesc(a: string, b: string): number {
@@ -402,7 +370,7 @@ export function maskShapes(text: string): ScrubResult {
     // When the KV alternative matched, the credential is a capture group.
     const captured = typeof rest[0] === "string" ? (rest[0] as string) : undefined;
     const target = captured ?? match;
-    if (isDenied(target)) return match;
+    if (isDigestShaped(target)) return match;
     if (target.length < MIN_SCRUBABLE_LENGTH) return match;
     hits++;
     return captured ? match.slice(0, match.length - captured.length) + GENERIC : GENERIC;

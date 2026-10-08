@@ -1,6 +1,6 @@
 import { findRefs } from "./substitute.ts";
 import { isValidName, MIN_SCRUBABLE_LENGTH } from "./refs.ts";
-import { looksCredentialish, shannonEntropy } from "./scrub.ts";
+import { looksCredentialish, shannonEntropy } from "./entropy.ts";
 
 export type Confidence = "anchored" | "kv" | "entropy";
 
