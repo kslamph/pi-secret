@@ -404,3 +404,67 @@ describe("/sec restore must never fail silently", () => {
     expect(notify).toHaveBeenCalledWith(expect.stringContaining("clipboard"), "info");
   });
 });
+
+/**
+ * spec §9's notify-only row: a bash redirect that would write a ref to a file runs, but
+ * the USER is warned. Never the model — a model told "your command wrote a masked ref to
+ * a file" reliably tries to fix it by rewriting the file, which is the corruption the
+ * design exists to prevent.
+ *
+ * The test drives the hook and asserts the warning lands on ctx.ui.notify and NOT in the
+ * hook's return value, because the hook's return value is what pi shows the model.
+ */
+describe("bash redirect warning — user only, and never blocking", () => {
+  // Same reason as the describes above: this file shares session file "/tmp/s.jsonl",
+  // and a previous describe deliberately replaces that vault's `values` with a thrower.
+  // Without dropping it, these tests run against a sabotaged vault.
+  beforeEach(() => {
+    dropSessionVault("/tmp/s.jsonl");
+    setActiveScopeKey(undefined);
+  });
+
+  const notify = () => vi.fn();
+
+  it("warns the user when a bash command writes a ref to a file", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
+    const n = notify();
+    const out = await h.fire(
+      "tool_call",
+      { toolName: "bash", input: { command: `printf '%s' "{{sec:gh_pat}}" > ~/.netrc` } },
+      { ...ctx, ui: { ...ctx.ui, notify: n } },
+    );
+    expect(n).toHaveBeenCalledWith(expect.stringContaining("~/.netrc"), "warning");
+    // Nothing that reaches the model: the hook returns undefined, so no reason string
+    // containing the ref (or anything else) is fed back into the conversation.
+    expect(out).toBeUndefined();
+  });
+
+  it("does not warn for a ref that is not written anywhere", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
+    const n = notify();
+    await h.fire(
+      "tool_call",
+      { toolName: "bash", input: { command: 'curl -H "Authorization: Bearer {{sec:gh_pat}}" https://api.github.com' } },
+      { ...ctx, ui: { ...ctx.ui, notify: n } },
+    );
+    expect(n).not.toHaveBeenCalled();
+  });
+
+  it("does not warn about ordinary redirection with no ref", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    const n = notify();
+    await h.fire("tool_call", { toolName: "bash", input: { command: "echo hi > out.txt" } }, {
+      ...ctx,
+      ui: { ...ctx.ui, notify: n },
+    });
+    expect(n).not.toHaveBeenCalled();
+  });
+});

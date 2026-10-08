@@ -10,6 +10,7 @@ import {
 } from "./glue.ts";
 import { bashIsOwnedByPiSecure, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
+import { bashRedirectWarning } from "./redirect.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
 import { isEnabled } from "./state.ts";
 import { registerCommands } from "./commands.ts";
@@ -116,6 +117,19 @@ export default function piSecure(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName === "bash" && isEnabled()) {
+      // spec §9's notify-only row. The command still runs — blocking would break
+      // `printf '%s' {{sec:x}} > ~/.netrc`, which is a real thing to want, and the file it
+      // lands in is outside our protection anyway.
+      //
+      // The warning goes to ctx.ui.notify ONLY. It must never enter model context: a model
+      // told "your command wrote a masked ref to a file" reliably tries to fix it by
+      // rewriting the file, which is exactly the corruption this row exists to avoid. So
+      // this hook still returns undefined on the warn path.
+      const rawCommand = (event.input as { command?: unknown }).command;
+      const warning = bashRedirectWarning(typeof rawCommand === "string" ? rawCommand : "");
+      if (warning) ctx.ui.notify(warning.message, "warning");
+    }
     if (!isEnabled()) return undefined;
     const out = injectToolCall(event.toolName, event.input as Record<string, unknown>, vault(ctx));
     if (out.blocked) return { block: true, reason: out.blocked.reason };
