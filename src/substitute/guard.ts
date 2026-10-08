@@ -1,5 +1,5 @@
 import type { Vault } from "../vault.ts";
-import { findRefs, type Ref } from "../refs.ts";
+import { findRefs, RESERVED_NAME, type Ref } from "../refs.ts";
 import { heredocRegions, scanBash } from "./bash.ts";
 
 export type RefDisposition = "expand" | "inert" | "unknown";
@@ -58,6 +58,14 @@ export function bashRefIssues(
   const names = vault.names();
   return classifyBashRefs(command, vault)
     .filter((r) => r.disposition !== "expand")
+    // §12h: an inert ref whose name stores nothing is prose — a commit message or
+    // comment quoting the syntax, not a value being denied delivery. Two things
+    // stay errors: a ref that RESOLVES (a real secret landing where it cannot
+    // expand) and the scrubber's reserved marker (a masked value being heredoc'd
+    // into a file — the mistake this guard exists for).
+    .filter(
+      (r) => !(r.disposition === "inert" && !vault.has(r.name) && r.name !== RESERVED_NAME),
+    )
     .map((r) => ({
       ref: r,
       problem:

@@ -1,4 +1,4 @@
-import { envVarName, findRefs, type SecretResolver } from "../refs.ts";
+import { envVarName, findRefs, RESERVED_NAME, type SecretResolver } from "../refs.ts";
 
 export interface BashExpansion {
   command: string;
@@ -490,13 +490,22 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
   const edits: Array<{ start: number; end: number; text: string }> = [];
 
   for (const ref of findRefs(command)) {
+    // §12h: a ref whose name stores nothing is SYNTAX BEING QUOTED — a commit
+    // message, a comment, documentation inside a heredoc. Nothing can be denied
+    // delivery because there is no value behind the name, so the fail-closed
+    // branches below do not apply to it: it passes through as the literal it
+    // already is. The scrubber's RESERVED_NAME is deliberately excluded: that
+    // name means a masked VALUE (not prose) is headed for a file. The guard
+    // (bashRefIssues) filters the same case, and the two must agree or an allow
+    // here is undone by the caller's `missing` block.
+    const prose = resolve(ref.name) === undefined && ref.name !== RESERVED_NAME;
     // A ref inside a comment is text bash DISCARDS — the command runs without it
     // ever being delivered. Expanding it would report the ref as `used` while
     // nothing reaches the child, which is exactly the silent-non-delivery failure:
     // the model believes it passed the token and has no reason to look again. Report
     // it missing so the caller blocks.
     if (comments.some((c) => ref.start >= c.start && ref.end <= c.end)) {
-      if (!missing.includes(ref.name)) missing.push(ref.name);
+      if (!prose && !missing.includes(ref.name)) missing.push(ref.name);
       continue;
     }
     // A quoted-delimiter heredoc body performs no expansion, so the ref cannot
@@ -504,7 +513,7 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
     // it: the caller blocks on `missing` instead of running a command that would
     // send the literal placeholder.
     if (inInertRegion(ref.start)) {
-      if (!missing.includes(ref.name)) missing.push(ref.name);
+      if (!prose && !missing.includes(ref.name)) missing.push(ref.name);
       continue;
     }
     // Fail closed: a quote left open means the lexer cannot know where it ends,
@@ -512,7 +521,7 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
     // command as a syntax error anyway; reporting it here makes the failure
     // ours, and ours is the message the model reads.
     if (unterminated && ref.start >= unterminated.index) {
-      if (!missing.includes(ref.name)) missing.push(ref.name);
+      if (!prose && !missing.includes(ref.name)) missing.push(ref.name);
       continue;
     }
     const varName = bind(ref.name);

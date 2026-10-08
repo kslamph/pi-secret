@@ -319,3 +319,33 @@ describe("phase 2 — arithmetic, comment and paren context", () => {
     expect(esc.command).toContain(`"$${GH_ENV}"`);
   });
 });
+
+describe("prose refs: a non-resolving ref in a non-expanding context is prose (§12h)", () => {
+  it("quoted-heredoc prose with a non-resolving name passes through literally", () => {
+    const cmd = "cat > /tmp/m.txt <<'MSG'\nuse {{sec:name}} syntax\nMSG";
+    const out = expandBash(cmd, resolve);
+    expect(out.command).toBe(cmd);
+    expect(out.missing).toEqual([]);
+    expect(out.env).toEqual({});
+  });
+
+  it("the same heredoc with a resolving name is still reported missing", () => {
+    const out = expandBash("cat <<'EOF'\n{{sec:gh_pat}}\nEOF", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+  });
+
+  it("a non-resolving ref inside a comment is discarded prose, not a delivery failure", () => {
+    const out = expandBash("echo ok # docs say {{sec:name}}", resolve);
+    expect(out.missing).toEqual([]);
+  });
+
+  it("a resolving ref inside a comment is still reported missing", () => {
+    const out = expandBash("echo ok # {{sec:gh_pat}}", resolve);
+    expect(out.missing).toEqual(["gh_pat"]);
+  });
+
+  it("the scrubber's reserved marker is never prose, even non-resolving", () => {
+    const out = expandBash("cat <<'EOF'\n{{sec:redacted}}\nEOF", resolve);
+    expect(out.missing).toEqual(["redacted"]);
+  });
+});

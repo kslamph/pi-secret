@@ -7,6 +7,7 @@ import {
   captureFromText,
   injectBashCommand,
   injectToolCall,
+  isDocPath,
   scrubCompactionSummaryFile,
   scrubMessageText,
   scrubOutputSnapshot,
@@ -445,5 +446,104 @@ describe("the compaction summary entry", () => {
     expect(
       scrubCompactionSummaryFile(join(tmpdir(), "pi-secret-missing-session.jsonl"), "e2", vaultWith()),
     ).toEqual({ rewritten: false, hits: 0 });
+  });
+});
+
+describe("isDocPath — where quoting the syntax is the norm (§12h)", () => {
+  it("accepts docs/tests/fixtures/examples segments and template suffixes", () => {
+    for (const p of [
+      "README.md", "docs/design.md", "DOC.md", "test/x.ts", "tests/a.test.ts",
+      "test/fixtures/realistic-bashrc.env", "examples/quickstart.md", "config.example",
+      "deploy.sample", "ci.template",
+    ]) {
+      expect(isDocPath(p), p).toBe(true);
+    }
+  });
+
+  it("rejects real config and source targets, including look-alike segments", () => {
+    for (const p of [".env", "config.yml", "src/index.ts", "notes.txt", "mydocs/x.env"]) {
+      expect(isDocPath(p), p).toBe(false);
+    }
+  });
+});
+
+describe("injectToolCall — write/edit ref gate (§12h)", () => {
+  it("doc target: allows a non-resolving ref, notifies once, substitutes nothing", () => {
+    const input = { path: "README.md", content: "use {{sec:name}} and {{sec:github_token}} here" };
+    const out = injectToolCall("write", input, makeVault());
+    expect(out.blocked).toBeUndefined();
+    expect(out.expanded).toEqual([]);
+    // Byte-identical: the allow path must return BEFORE expansion, or a doc quoting a
+    // resolving name would become the one file on disk that holds the value.
+    expect(input.content).toBe("use {{sec:name}} and {{sec:github_token}} here");
+    expect(out.notify).toMatch(/README\.md/);
+    expect(out.notify).toMatch(/names only/i);
+  });
+
+  it("doc target: a RESOLVING ref is allowed for documentation and not substituted", () => {
+    const input = { path: "docs/setup.md", content: "run it with {{sec:gh_pat}}" };
+    const out = injectToolCall("write", input, makeVault());
+    expect(out.blocked).toBeUndefined();
+    expect(out.expanded).toEqual([]);
+    expect(input.content).toContain("{{sec:gh_pat}}");
+    expect(out.notify).toMatch(/docs\/setup\.md/);
+  });
+
+  it("non-doc target, non-resolving ref: silent allow, content untouched", () => {
+    const input = { path: "notes.txt", content: "the syntax is {{sec:name}}" };
+    const out = injectToolCall("write", input, makeVault());
+    expect(out.blocked).toBeUndefined();
+    expect(out.notify).toBeUndefined();
+    expect(input.content).toBe("the syntax is {{sec:name}}");
+  });
+
+  it("non-doc target, resolving ref: still refused, and the reason says why it resolves", () => {
+    const out = injectToolCall("edit", { path: "config.yml", oldText: "a", newText: "k={{sec:gh_pat}}" }, makeVault());
+    expect(out.blocked?.reason).toMatch(/not written to files/);
+    expect(out.blocked?.reason).toMatch(/resolves/);
+    expect(out.blocked?.reason).not.toContain(GH);
+  });
+
+
+  it("the scrubber's reserved marker is never prose in a real target (canary: masked value persisted)", () => {
+    const out = injectToolCall("write", { path: "leak.txt", content: "token={{sec:redacted}}" }, makeVault());
+    expect(out.blocked?.reason).toMatch(/marker|redacted/);
+    expect(out.blocked?.reason).not.toContain(GH);
+  });
+
+  it("a doc target may quote the reserved marker (the spec and README do)", () => {
+    const input = { path: "docs/design.md", content: "the fallback renders {{sec:redacted}}" };
+    const out = injectToolCall("write", input, makeVault());
+    expect(out.blocked).toBeUndefined();
+    expect(input.content).toContain("{{sec:redacted}}");
+    expect(out.notify).toMatch(/docs\/design\.md/);
+  });
+
+  it("a heredoc carrying the reserved marker is still refused", () => {
+    const out = injectBashCommand("cat <<'EOF'\n{{sec:redacted}}\nEOF", makeVault());
+    expect(out.block?.reason).toMatch(/will not expand it/);
+  });
+
+  it("a ref in the path field is refused whatever the target class", () => {
+    const out = injectToolCall("write", { path: "docs/{{sec:name}}.md", content: "x" }, makeVault());
+    expect(out.blocked?.reason).toMatch(/path/i);
+  });
+});
+
+describe("injectBashCommand — prose refs in non-expanding contexts (§12h)", () => {
+  it("the commit-message incident: quoted heredoc, non-resolving name, passes through", () => {
+    // NB: the original incident quoted the RESERVED marker name; quoting THAT
+    // through bash into a non-doc file stays refused (see the test below), so the
+    // vector stands for the class — prose quoting a placeholder nobody stores.
+    const cmd = "cat > /tmp/commit-msg.txt <<'MSG'\nfix: use {{sec:token}} here\nMSG";
+    const out = injectBashCommand(cmd, makeVault());
+    expect(out.block).toBeUndefined();
+    expect(out.command).toBe(cmd);
+    expect(out.env).toEqual({});
+  });
+
+  it("the same heredoc with a RESOLVING name is still refused", () => {
+    const out = injectBashCommand("cat <<'EOF'\n{{sec:gh_pat}}\nEOF", makeVault());
+    expect(out.block?.reason).toMatch(/will not expand it/);
   });
 });

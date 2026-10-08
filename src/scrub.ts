@@ -1,4 +1,4 @@
-import { MIN_SCRUBABLE_LENGTH, derivedForms } from "./refs.ts";
+import { MIN_SCRUBABLE_LENGTH, derivedForms, RESERVED_NAME } from "./refs.ts";
 import { PROVIDER_PREFIX_SOURCES, SENSITIVE_NAME_SOURCE, isDigestShaped } from "./entropy.ts";
 
 export interface SecretProvider {
@@ -36,7 +36,7 @@ export interface ScrubResult {
   hits: number;
 }
 
-const GENERIC = "{{sec:redacted}}";
+const GENERIC = `{{sec:${RESERVED_NAME}}}`;
 
 /**
  * Anchored provider formats, most specific prefix first so `dckr_pat_` wins over

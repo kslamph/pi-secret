@@ -3,6 +3,16 @@ import { createHash } from "node:crypto";
 /** Shared by injection and scrubbing so both agree on what a ref looks like. */
 export const REF_RE = /\{\{sec:([a-z][a-z0-9_-]{0,63})\}\}/g;
 
+/**
+ * The scrubber's reserved marker name (§12h). When masking has no known name to
+ * use — shape matches and fail-closed fallbacks — it mints `{{sec:redacted}}`.
+ * That name therefore means "this text came out of our scrubber", never "prose
+ * quoting the syntax", and the write gate treats it accordingly: a non-resolving
+ * ref with any other name is quoted syntax; one with THIS name is a masked value
+ * on its way into a file and is refused.
+ */
+export const RESERVED_NAME = "redacted";
+
 export interface Ref {
   raw: string;
   name: string;

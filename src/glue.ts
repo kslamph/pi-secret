@@ -4,7 +4,7 @@ import { bashRefIssues, expandBash, expandRefs, findRefs } from "./substitute.ts
 import { redactAllText, scrubDeep, scrubText } from "./scrub.ts";
 import { applyCapture, findCandidates, suggestNames, type CapturedItem } from "./capture.ts";
 
-import { MIN_SCRUBABLE_LENGTH } from "./refs.ts";
+import { MIN_SCRUBABLE_LENGTH, RESERVED_NAME } from "./refs.ts";
 
 const BLOCKED_IN_PATH = new Set(["read", "grep", "find", "ls"]);
 const PRESERVED_DETAIL_KEYS: ReadonlySet<string> = new Set(["fullOutputPath"]);
@@ -17,6 +17,8 @@ export interface ToolCallLike {
 
 export interface InjectOutcome {
   blocked?: { reason: string };
+  /** §12h: user-only notice for deliberate allows (doc/test targets). Never model-facing. */
+  notify?: string;
   expanded: string[];
   env: Record<string, string>;
 }
@@ -25,6 +27,26 @@ const FILE_WRITE_REASON =
   "sec refs are not written to files (the literal text would be stored, not the value). " +
   "Materializing secrets into files is out of scope. If this value came from a scrubbed " +
   "tool result, tell the user where it needs to go and let them place it.";
+
+/*
+ * §12h: where quoting the ref SYNTAX is the norm, so the write gate must not fire.
+ *
+ * The guard is a correctness tripwire, not a boundary — the model can assemble the
+ * literal at runtime and always could. What it actually catches is a masked value
+ * being persisted into a file a consumer expects to hold a real credential, and that
+ * mistake always resolves in the vault, or is the scrubber's reserved marker.
+ * Documentation, tests, fixtures and templates quote the syntax on purpose; a name
+ * that stores nothing cannot be a persisted value.
+ */
+const DOC_SEGMENT_RE = /(?:^|\/)(?:docs?|tests?|fixtures?|examples?)(?:\/|$)/i;
+const DOC_SUFFIX_RE = /\.(?:markdown|md|example|sample|template)$/i;
+
+/** Is this target documentation/test/fixture/template territory (§12h)? */
+export function isDocPath(path: string): boolean {
+  // Whole path segments only: `mydocs/x.env` and `testing/x` stay real targets,
+  // because the segment must be bounded by start-or-slash on both sides.
+  return DOC_SEGMENT_RE.test(path) || DOC_SUFFIX_RE.test(path);
+}
 
 interface RefHit {
   container: Record<string, unknown> | unknown[];
@@ -123,18 +145,79 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
       env: {},
     };
   }
-  if (BLOCKED_IN_PATH.has(toolName) || BLOCKED_IN_CONTENT.has(toolName)) {
+  if (BLOCKED_IN_PATH.has(toolName)) {
     const serialized = JSON.stringify(input) ?? "";
     if (findRefs(serialized).length) {
       return {
+        blocked: { reason: `sec: refs are not a valid path or pattern for ${toolName}.` },
+        expanded: [],
+        env: {},
+      };
+    }
+  }
+  if (BLOCKED_IN_CONTENT.has(toolName)) {
+    // §12h order: an address is never syntax; then the target class; then whether
+    // the ref could actually be a persisted value. Every allow returns BEFORE the
+    // expansion loop — substituting into a doc would create the one file on disk
+    // that holds the value.
+    const path = typeof input.path === "string" ? input.path : "";
+    if (findRefs(path).length) {
+      return {
         blocked: {
-          reason: BLOCKED_IN_CONTENT.has(toolName)
-            ? FILE_WRITE_REASON
-            : `sec: refs are not a valid path or pattern for ${toolName}.`,
+          reason:
+            "a sec ref cannot be a file path — the literal placeholder would NAME the file, not deliver the value.",
         },
         expanded: [],
         env: {},
       };
+    }
+    const contentOnly = JSON.stringify(
+      Object.fromEntries(Object.entries(input).filter(([k]) => k !== "path")),
+    );
+    const refs = findRefs(contentOnly ?? "");
+    if (refs.length) {
+      if (isDocPath(path)) {
+        const n = refs.length;
+        return {
+          expanded: [],
+          env: {},
+          notify:
+            `pi-secret: ${n} sec ref${n === 1 ? "" : "s"} written literally to ${path} — ` +
+            "documentation/test target: names only, no values were substituted.",
+        };
+      }
+      const resolving = refs.filter((r) => vault.has(r.name));
+      if (resolving.length) {
+        return {
+          blocked: {
+            reason:
+              FILE_WRITE_REASON +
+              ` (sec:${resolving.map((r) => r.name).join(", ")} resolves in this session's vault)`,
+          },
+          expanded: [],
+          env: {},
+        };
+      }
+      // The scrubber's own marker is never prose in a real target: it means a
+      // masked value — not a stored one, so it did not trip `resolving` — is on
+      // its way into a file. The canary for this is a shape-masked token read
+      // back from a tool result and dutifully persisted. Documentation may quote
+      // the marker (the spec does); anything else may not.
+      if (refs.some((r) => r.name === RESERVED_NAME)) {
+        return {
+          blocked: {
+            reason:
+              "this text carries the scrubber's marker (sec:redacted): it came out of a masked " +
+              "result, and writing it stores the placeholder, not the value. Tell the user where " +
+              "the value needs to go and let them place it. (Quoting the marker as prose? Doc and " +
+              "test targets allow it; or quote a different placeholder name.)",
+          },
+          expanded: [],
+          env: {},
+        };
+      }
+      // Non-resolving prose in a non-doc target: quoting syntax nobody stores.
+      return { expanded: [], env: {} };
     }
   }
   // bash is owned by the wrapped tool's spawnHook (Task 9). It must see the

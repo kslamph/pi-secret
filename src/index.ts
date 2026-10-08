@@ -186,6 +186,9 @@ export default function piSecret(pi: ExtensionAPI): void {
     }
     if (!isEnabled()) return undefined;
     const out = injectToolCall(event.toolName, event.input as Record<string, unknown>, vault(ctx));
+    // §12h: deliberate allows on doc/test targets tell the USER (names only, no
+    // values) — same channel and same rule as the redirect warning above.
+    if (out.notify && ctx.hasUI) ctx.ui.notify(out.notify, "info");
     if (out.blocked) return { block: true, reason: out.blocked.reason };
     return undefined;
   });

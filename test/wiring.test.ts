@@ -180,6 +180,19 @@ describe("pi-secret wiring", () => {
     expect(blocked.reason).not.toContain(GH);
   });
 
+  it("a doc write quoting the syntax is allowed and notifies the user only (§12h)", async () => {
+    const h = harness();
+    piSecret(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    const res = (await h.fire(
+      "tool_call",
+      { toolName: "write", toolCallId: "c9", input: { path: "README.md", content: "syntax: {{sec:name}}" } },
+      ctx,
+    )) as { block?: unknown } | undefined;
+    expect(res).toBeUndefined();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/README\.md/), "info");
+  });
+
   it("scrubs values and shapes out of tool results", async () => {
     const h = harness();
     piSecret(h.pi);
