@@ -468,3 +468,36 @@ describe("bash redirect warning — user only, and never blocking", () => {
     expect(n).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * spec §5's discovery surface. `addAutocompleteProvider` lives on the UI CONTEXT, not the
+ * ExtensionAPI, so it is registered in session_start — which means a wiring test that only
+ * checks `pi.on(...)` and `pi.registerTool(...)` would never notice it going missing, and
+ * `{{sec:` would silently stop completing.
+ */
+describe("the editor surface", () => {
+  it("registers one autocomplete factory on the UI context at session start", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    const addAutocompleteProvider = vi.fn();
+    const uiCtx = {
+      ...ctx,
+      ui: { ...ctx.ui, addAutocompleteProvider },
+      hasUI: true,
+    };
+    await h.fire("session_start", { reason: "startup" }, uiCtx);
+    expect(addAutocompleteProvider).toHaveBeenCalledTimes(1);
+    // It must be a FACTORY (pi composes providers by calling it with the current one),
+    // not a provider object — passing the object would break every other provider.
+    const arg = addAutocompleteProvider.mock.calls[0]![0];
+    expect(typeof arg).toBe("function");
+  });
+
+  it("survives a headless session with no UI context", async () => {
+    // A throw here would abort session_start, taking the whole extension with it.
+    const h = harness();
+    piSecure(h.pi);
+    const brokenUi = { ...ctx, ui: {} as never, hasUI: false };
+    await expect(h.fire("session_start", { reason: "startup" }, brokenUi)).resolves.not.toThrow();
+  });
+});

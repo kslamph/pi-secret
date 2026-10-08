@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { dropSessionVault, setActiveScopeKey, vaultForSession, type Vault } from "./vault.ts";
+import { activeVault, dropSessionVault, setActiveScopeKey, vaultForSession, type Vault } from "./vault.ts";
 import {
   captureFromText,
   injectToolCall,
@@ -11,6 +11,7 @@ import {
 import { bashIsOwnedByPiSecure, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
 import { bashRedirectWarning } from "./redirect.ts";
+import { createSecAutocompleteProvider } from "./autocomplete.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
 import { isEnabled } from "./state.ts";
 import { registerCommands } from "./commands.ts";
@@ -82,6 +83,17 @@ export default function piSecure(pi: ExtensionAPI): void {
     setActiveScopeKey(sessionScope(ctx));
     registerSecureBash(pi, ctx.cwd, { vault: () => vault(ctx) });
     pi.registerTool(createSecListTool(() => vault(ctx)));
+    // spec §5's discovery surface: `{{sec:` completes from the vault. It lives on the UI
+    // context, not the ExtensionAPI, so it is registered here rather than at load. The
+    // provider itself handles being asked before a vault exists (activeVault throws, and
+    // the provider returns null) — an autocomplete popup that throws would take the
+    // editor's key handling down with it.
+    try {
+      ctx.ui.addAutocompleteProvider(() => createSecAutocompleteProvider(activeVault));
+    } catch {
+      // Headless (no UI context): there is no editor to complete in.
+    }
+
     if (!ownsBash(pi)) {
       ctx.ui.notify(
         "pi-secure: another extension owns `bash`, so {{sec:…}} refs will NOT expand. Load pi-secure after it, or disable that extension.",
@@ -200,6 +212,8 @@ export default function piSecure(pi: ExtensionAPI): void {
   pi.registerEntryRenderer(RECEIPT_TYPE, (entry, _options, theme) =>
     buildReceiptComponent(entry.data as Receipt, theme),
   );
+
+
 
   /**
    * Compaction is the ONE model-authored text pi persists without passing it through
