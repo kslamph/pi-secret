@@ -23,16 +23,32 @@ export function refPrefixBefore(textBeforeCursor: string): { prefix: string; typ
   return { prefix: PREFIX + m[1]!, typed: m[1]! };
 }
 
-export function createSecAutocompleteProvider(getVault: () => Vault): AutocompleteProvider {
+/**
+ * `base` is pi's CURRENT provider — the built-in command/file provider, or another
+ * extension's wrapper. `ctx.ui.addAutocompleteProvider` is a WRAPPER hook: pi calls
+ * `factory(current)` and installs the result, so a provider that ignores `current` does not
+ * "add" completion, it REPLACES the chain. That was the bug this parameter fixes: every
+ * completion the base provider used to answer (`/` commands, `@` files, Tab file
+ * completion) came back null, which the user experiences as the Tab key being broken.
+ *
+ * So this provider answers only the slice of the editor it owns and delegates everything
+ * else, unchanged, to the provider underneath.
+ */
+export function createSecAutocompleteProvider(
+  getVault: () => Vault,
+  base?: AutocompleteProvider,
+): AutocompleteProvider {
   return {
     // `{` is the only character that can begin a ref. The provider still declines to
-    // suggest for an ordinary brace, so an unrelated `{` opens nothing.
-    triggerCharacters: ["{"],
+    // suggest for an ordinary brace, so an unrelated `{` opens nothing. The base
+    // provider's own triggers are preserved: pi unions these, and dropping `@`/`/` would
+    // disable the debounced completion path for those tokens.
+    triggerCharacters: [...new Set([...(base?.triggerCharacters ?? []), "{"])],
 
-    async getSuggestions(lines, cursorLine, cursorCol) {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
       const line = lines[cursorLine] ?? "";
       const match = refPrefixBefore(line.slice(0, cursorCol));
-      if (!match) return null;
+      if (!match) return base ? base.getSuggestions(lines, cursorLine, cursorCol, options) : null;
       let entries;
       try {
         entries = getVault().entries();
@@ -52,6 +68,14 @@ export function createSecAutocompleteProvider(getVault: () => Vault): Autocomple
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      // The prefix identifies whose suggestion is being applied. Ours is always the ref
+      // prefix (the editor echoes back what `getSuggestions` returned), so anything else
+      // belongs to the base provider and must be applied by it, not rewritten here.
+      if (!prefix.startsWith(PREFIX)) {
+        return base
+          ? base.applyCompletion(lines, cursorLine, cursorCol, item, prefix)
+          : { lines, cursorLine, cursorCol };
+      }
       const line = lines[cursorLine] ?? "";
       // Only the typed token is replaced; anything the user already typed after the
       // cursor (a closing `}}`, a trailing argument) stays where it is, so completing
@@ -65,5 +89,15 @@ export function createSecAutocompleteProvider(getVault: () => Vault): Autocomple
       next[cursorLine] = rewritten;
       return { lines: next, cursorLine, cursorCol: before.length + PREFIX.length + item.value.length + 2 };
     },
+
+    // Force-Tab (plain Tab outside a slash command) consults this before opening the file
+    // picker. The base provider's rule is the one that knows when a path makes sense, so
+    // forward it rather than inventing a second opinion.
+    ...(base?.shouldTriggerFileCompletion
+      ? {
+          shouldTriggerFileCompletion: (lines: string[], cursorLine: number, cursorCol: number) =>
+            base.shouldTriggerFileCompletion!(lines, cursorLine, cursorCol),
+        }
+      : {}),
   };
 }

@@ -527,6 +527,18 @@ describe("the editor surface", () => {
     // not a provider object — passing the object would break every other provider.
     const arg = addAutocompleteProvider.mock.calls[0]![0];
     expect(typeof arg).toBe("function");
+    // And the factory must WRAP the provider pi hands it, not discard it: a standalone
+    // provider replaces the built-in chain, which kills `/`, `@` and Tab completion.
+    const builtin = {
+      triggerCharacters: ["@", "/"],
+      getSuggestions: async () => ({ items: [{ value: "builtin", label: "builtin" }], prefix: "b" }),
+      applyCompletion: () => ({ lines: ["builtin"], cursorLine: 0, cursorCol: 0 }),
+    };
+    const wrapped = (arg as (current: unknown) => { getSuggestions: (l: string[], cl: number, cc: number, o: never) => Promise<unknown> })(builtin);
+    const out = (await wrapped.getSuggestions(["echo b"], 0, 6, { signal: new AbortController().signal } as never)) as {
+      items: { value: string }[];
+    };
+    expect(out.items[0]!.value).toBe("builtin");
   });
 
   it("survives a headless session with no UI context", async () => {

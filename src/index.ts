@@ -117,7 +117,12 @@ export default function piSecure(pi: ExtensionAPI): void {
     // the provider returns null) — an autocomplete popup that throws would take the
     // editor's key handling down with it.
     try {
-      ctx.ui.addAutocompleteProvider(() => createSecAutocompleteProvider(activeVault));
+      // WRAPPER, not replacement: pi calls the factory with the provider already
+      // installed (its built-in command/file provider, or another extension's wrapper)
+      // and uses the RESULT. Returning a standalone provider silently discards the
+      // built-in completion chain — `/` commands, `@` files and Tab file completion all
+      // answer null — so `current` must be threaded through.
+      ctx.ui.addAutocompleteProvider((current) => createSecAutocompleteProvider(activeVault, current));
     } catch {
       // Headless (no UI context): there is no editor to complete in.
     }
