@@ -41,6 +41,25 @@ export function registerCommands(pi: ExtensionAPI): void {
   });
 }
 
+/**
+ * The question `/sec off` used to skip.
+ *
+ * `/sec remove` asked before deleting ONE value while `/sec off` deleted EVERY value in the
+ * session and asked nothing — the more destructive verb was the unguarded one, and the menu's
+ * toggle reached the same action with no guard at all. Both doors go through here.
+ *
+ * Declining means the whole operation is cancelled, not just the clearing: the question is
+ * "clean all keys AND disable sec?", so "no" leaves the extension on with its values spendable.
+ *
+ * Two cases skip the question. An empty vault has nothing to lose, and asking there is pure
+ * ceremony. A context with no UI cannot ask, and silently refusing to disable would be a worse
+ * failure than the one this guard prevents — headless `/sec off` keeps working.
+ */
+async function confirmClearAll(ctx: ExtensionCommandContext, vault: Vault): Promise<boolean> {
+  if (!ctx.hasUI || vault.size() === 0) return true;
+  return ctx.ui.confirm("Disable pi-secure", "CLEAN ALL KEYS, and disable SEC?");
+}
+
 export async function runSecCommand(
   input: string,
   vault: Vault,
@@ -142,6 +161,9 @@ export async function runSecCommand(
     }
 
     case "off":
+      // Ask BEFORE anything changes: a declined answer must leave the extension enabled with
+      // its values intact, which is only possible if the prompt comes first.
+      if (!(await confirmClearAll(ctx, vault))) return;
       setEnabled(false);
       // The values go too. Leaving them in memory would mean "off" stopped handing out
       // new capabilities while every existing ref stayed spendable, which is not what
@@ -200,14 +222,18 @@ export async function runSecMenu(ctx: ExtensionCommandContext, vault: Vault): Pr
       continue;
     }
     if (choice.kind === "toggle") {
-      setEnabled(!isEnabled());
       if (isEnabled()) {
+        // Same guard as the verb form: this shortcut clears the session's values, so it asks
+        // the same question. Declining changes nothing.
+        if (!(await confirmClearAll(ctx, vault))) continue;
+        setEnabled(false);
+        dropActiveVault();
+        ctx.ui.notify("pi-secure disabled and this session's values were cleared", "warning");
+      } else {
+        setEnabled(true);
         // Re-enabling never restores values: /sec off cleared them, and silently bringing
         // secrets back would make the switch meaningless.
         ctx.ui.notify("pi-secure enabled — add secrets again with /sec", "info");
-      } else {
-        dropActiveVault();
-        ctx.ui.notify("pi-secure disabled and this session's values were cleared", "warning");
       }
       continue;
     }

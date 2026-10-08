@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { entryRows, secretRows, selectList, statusLine, type Row } from "../src/menu.ts";
-import { Vault, type PublicEntry } from "../src/vault.ts";
+import { Vault, vaultForSession, setActiveScopeKey, type PublicEntry } from "../src/vault.ts";
+import { isEnabled, setEnabled } from "../src/state.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 const NOW = 1_760_000_000_000;
@@ -267,5 +268,61 @@ describe("leaving an entry menu", () => {
     // action page is drawn ONCE — without it the menu would offer rename/remove for a name
     // that is not in the vault, which is how a user ends up staring at a secret that is gone.
     expect(ctx.ui.custom).toHaveBeenCalledTimes(3);
+  });
+});
+
+/**
+ * The menu's toggle is the same destructive action as `/sec off`, reached by a different door,
+ * so it must ask the same question. Guarding only the verb form would leave the shortcut that
+ * clears everything unguarded.
+ */
+describe("turning pi-secure off from the menu", () => {
+  it("asks first, and leaves everything alone when the user declines", async () => {
+    setEnabled(true);
+    // The REGISTRY instance: the toggle calls dropActiveVault(), which empties the value
+    // registered for the active scope. A standalone `new Vault(...)` is not that object, so
+    // asserting on it would pass no matter what the toggle did.
+    setActiveScopeKey("menu-toggle-decline");
+    const vault = vaultForSession("menu-toggle-decline");
+    vault.add("gh_pat", GH, "prompt");
+    const confirm = vi.fn(async () => false);
+    const ctx = {
+      mode: "tui" as const,
+      hasUI: true,
+      ui: { notify: vi.fn(), input: vi.fn(), confirm, custom: vi.fn() },
+    };
+    const script = [{ kind: "toggle" } as const, null];
+    let i = 0;
+    ctx.ui.custom = vi.fn(async () => script[i++] ?? null) as never;
+    const { runSecMenu } = await import("../src/commands.ts");
+    await runSecMenu(ctx as never, vault);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(isEnabled()).toBe(true);
+    expect(vaultForSession("menu-toggle-decline").resolve("gh_pat")).toBe(GH);
+    setEnabled(true);
+    setActiveScopeKey(undefined);
+  });
+
+  it("clears and disables when the user confirms", async () => {
+    setEnabled(true);
+    setActiveScopeKey("menu-toggle-accept");
+    const vault = vaultForSession("menu-toggle-accept");
+    vault.add("gh_pat", GH, "prompt");
+    const confirm = vi.fn(async () => true);
+    const ctx = {
+      mode: "tui" as const,
+      hasUI: true,
+      ui: { notify: vi.fn(), input: vi.fn(), confirm, custom: vi.fn() },
+    };
+    const script = [{ kind: "toggle" } as const, null];
+    let i = 0;
+    ctx.ui.custom = vi.fn(async () => script[i++] ?? null) as never;
+    const { runSecMenu } = await import("../src/commands.ts");
+    await runSecMenu(ctx as never, vault);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(isEnabled()).toBe(false);
+    expect(vaultForSession("menu-toggle-accept").names()).toEqual([]);
+    setEnabled(true);
+    setActiveScopeKey(undefined);
   });
 });

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSecure from "../src/index.ts";
 import { activeScopeKey, setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
-import { setEnabled } from "../src/state.ts";
+import { isEnabled, setEnabled } from "../src/state.ts";
 import { runSecCommand } from "../src/commands.ts";
 import { Vault } from "../src/vault.ts";
 import { scrubToolResult } from "../src/glue.ts";
@@ -658,6 +658,80 @@ describe("/sec off is a real off", () => {
     await runSecCommand("off", vaultForSession("off-scope-3"), { ui: { notify } } as never);
     const [message] = notify.mock.calls.at(-1)! as [string];
     expect(message).toMatch(/cleared/i);
+    setActiveScopeKey(undefined);
+  });
+});
+
+/**
+ * `/sec remove` asked before deleting ONE value; `/sec off` deleted EVERY value in the
+ * session and asked nothing. The asymmetry is the bug: the more destructive verb was the
+ * unguarded one.
+ */
+describe("/sec off asks before it clears the whole session", () => {
+  it("does nothing at all when the user declines", async () => {
+    // Precondition, not inherited state: an earlier block leaves the switch OFF, and a
+    // decline test that starts from OFF would pass without the guard existing at all.
+    setEnabled(true);
+    setActiveScopeKey("off-confirm-declined");
+    const vault = vaultForSession("off-confirm-declined");
+    vault.add("gh_pat", GH, "prompt");
+    const confirm = vi.fn(async () => false);
+    await runSecCommand("off", vault, { hasUI: true, ui: { notify: vi.fn(), confirm } } as never);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    // Declining means "do not do the thing": still enabled, values still spendable.
+    expect(isEnabled()).toBe(true);
+    expect(vaultForSession("off-confirm-declined").resolve("gh_pat")).toBe(GH);
+    setActiveScopeKey(undefined);
+  });
+
+  it("clears and disables when the user confirms", async () => {
+    setActiveScopeKey("off-confirm-accepted");
+    const vault = vaultForSession("off-confirm-accepted");
+    vault.add("gh_pat", GH, "prompt");
+    const confirm = vi.fn(async () => true);
+    await runSecCommand("off", vault, { hasUI: true, ui: { notify: vi.fn(), confirm } } as never);
+    expect(isEnabled()).toBe(false);
+    expect(vaultForSession("off-confirm-accepted").names()).toEqual([]);
+    setEnabled(true);
+    setActiveScopeKey(undefined);
+  });
+
+  it("says plainly that every key is about to go", async () => {
+    setActiveScopeKey("off-confirm-wording");
+    vaultForSession("off-confirm-wording").add("gh_pat", GH, "prompt");
+    const confirm = vi.fn(async () => true);
+    await runSecCommand("off", vaultForSession("off-confirm-wording"), {
+      hasUI: true,
+      ui: { notify: vi.fn(), confirm },
+    } as never);
+    const [title, message] = confirm.mock.calls[0]! as unknown as [string, string];
+    expect(`${title} ${message}`).toMatch(/all keys/i);
+    expect(message).toMatch(/disable/i);
+    setEnabled(true);
+    setActiveScopeKey(undefined);
+  });
+
+  it("does not ask to clear an already-empty vault — there is nothing to lose", async () => {
+    setActiveScopeKey("off-confirm-empty");
+    const confirm = vi.fn(async () => true);
+    await runSecCommand("off", vaultForSession("off-confirm-empty"), {
+      hasUI: true,
+      ui: { notify: vi.fn(), confirm },
+    } as never);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(isEnabled()).toBe(false);
+    setEnabled(true);
+    setActiveScopeKey(undefined);
+  });
+
+  it("keeps working with no UI to ask (headless), rather than silently doing nothing", async () => {
+    setActiveScopeKey("off-confirm-headless");
+    const vault = vaultForSession("off-confirm-headless");
+    vault.add("gh_pat", GH, "prompt");
+    await runSecCommand("off", vault, { hasUI: false, ui: { notify: vi.fn() } } as never);
+    expect(isEnabled()).toBe(false);
+    expect(vaultForSession("off-confirm-headless").names()).toEqual([]);
+    setEnabled(true);
     setActiveScopeKey(undefined);
   });
 });
