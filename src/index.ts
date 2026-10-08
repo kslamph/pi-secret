@@ -1,6 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { dropSessionVault, setActiveScopeKey, vaultForSession, type Vault } from "./vault.ts";
-import { captureFromText, injectToolCall, scrubDeepFailClosed, scrubOutputSnapshot, scrubToolResult } from "./glue.ts";
+import {
+  captureFromText,
+  injectToolCall,
+  scrubCompactionSummaryFile,
+  scrubDeepFailClosed,
+  scrubOutputSnapshot,
+  scrubToolResult,
+} from "./glue.ts";
 import { bashIsOwnedByPiSecure, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
@@ -179,6 +186,28 @@ export default function piSecure(pi: ExtensionAPI): void {
   pi.registerEntryRenderer(RECEIPT_TYPE, (entry, _options, theme) =>
     buildReceiptComponent(entry.data as Receipt, theme),
   );
+
+  /**
+   * Compaction is the ONE model-authored text pi persists without passing it through
+   * `message_end`, so the summary reaches the session file before this extension has
+   * any chance to look at it. The wire is already safe (`context` and
+   * `before_provider_request` both scrub outbound), but the file is the transcript of
+   * record, and a summary outlives the turn that produced it. So the entry is amended
+   * in place, and only when it actually contains something.
+   *
+   * There is no `message_end` for this text and no public API to amend an entry, hence
+   * the targeted rewrite of one JSONL line.
+   */
+  pi.on("session_compact", async (event, ctx) => {
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return;
+    const entry = (event as { compactionEntry?: { id?: string } }).compactionEntry;
+    if (!entry?.id) return;
+    const out = scrubCompactionSummaryFile(file, entry.id, vault(ctx));
+    if (out.rewritten && ctx.hasUI) {
+      ctx.ui.notify(`pi-secure masked ${out.hits} secret occurrence(s) in a compaction summary`, "info");
+    }
+  });
 
   registerCommands(pi);
 }

@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { buildSessionContext, parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import { artifacts, makeSecureSession, readAll } from "../helpers/session.ts";
-import { setActiveScopeKey, vaultForSession } from "../../src/vault.ts";
+import { dropSessionVault, setActiveScopeKey, vaultForSession } from "../../src/vault.ts";
 
 const CANARY = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 const AMBIENT = "AKIAIOSFODNN7EXAMPLE";
@@ -192,5 +193,139 @@ describe("canary sweep", () => {
     const corpus = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
     expect(corpus).not.toContain(CANARY);
     delete process.env.PISEC_CANARY;
+  });
+});
+
+// --- spec §13 blind spots, closed 2026-10-08 ------------------------------------
+// Two paths the canary never exercised, both of which load persisted material back
+// into a model-facing context. spec §3 records the reason they matter: the `context`
+// hook is wired only through transformContext and is NOT on the compaction path
+// (branch-summarization.js:224-226), so "write-time scrubbing is load-bearing, not
+// defense-in-depth" was an argument, never a test.
+
+/** Flatten an AgentMessage to the text a model would actually read. */
+function materialText(messages: unknown[]): string {
+  return messages
+    .map((m) => {
+      const content = (m as { content?: unknown }).content;
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content
+        .map((block) =>
+          block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string"
+            ? (block as { text: string }).text
+            : "",
+        )
+        .join("");
+    })
+    .join("\n");
+}
+
+describe("the last mile — the only place the bytes themselves are observable", () => {
+  it("never puts a vaulted value on the wire, including in a compaction summary", async () => {
+    // This scenario could not exist before 2026-10-08. pi's before_provider_request
+    // hook is fired by pi-ai's REAL provider implementations (api/openai-completions.js:204
+    // and its siblings); the faux provider the suite drives never calls options.onPayload.
+    // Measured with a probe extension: agent_start, context, message_end, tool_call and
+    // tool_result all fire under the harness, and before_provider_request fires ZERO times.
+    // So "the bytes leaving the machine are scrubbed" — the README's central claim — had
+    // never been asserted by anything. The harness now injects the callback a real
+    // provider would, and this asserts on what the hook RETURNED.
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    const wire: unknown[] = [];
+    const harness = await makeSecureSession({
+      cwd,
+      onProviderPayload: (payload) => {
+        wire.push(payload);
+      },
+      settings: { compaction: { keepRecentTokens: 1 } },
+      responses: [
+        fauxAssistantMessage([fauxToolCall("bash", { command: `printf %s "${CANARY}"` })]),
+        fauxAssistantMessage("done"),
+        fauxAssistantMessage("more"),
+      ],
+    });
+    teardown.push(() => harness.dispose());
+    seedVault(harness.sessionFile() ?? "ephemeral");
+
+    await harness.session.prompt("print the token");
+
+    // A vault-only value, echoed by the model inside a compaction summary. Compaction is
+    // a model call, so the summary is exactly where a value could reappear — and spec 3
+    // records that this path bypasses the `context` hook (branch-summarization.js:224-226).
+    const material = materialText(harness.session.messages);
+    expect(material).toContain("{{sec:gh_pat}}");
+    expect(material).not.toContain(CANARY);
+    harness.faux.appendResponses([
+      fauxAssistantMessage(`prefix:\n${material}\n(repeats: ${CANARY})`),
+      fauxAssistantMessage(`summary:\n${material}\n(repeats: ${CANARY})`),
+    ]);
+    await harness.session.compact();
+    harness.faux.appendResponses([fauxAssistantMessage("still here")]);
+    await harness.session.prompt("and now?");
+
+    // Non-vacuity first: if the hook never fired, this is vacuously safe.
+    expect(wire.length).toBeGreaterThanOrEqual(3);
+    const sent = JSON.stringify(wire);
+    expect(sent).not.toContain(CANARY);
+    // And non-blackout: the ref really is what travels.
+    expect(sent).toContain("{{sec:gh_pat}}");
+
+    // The FILE is the other half, and it is the half that was open until 2026-10-08.
+    // pi writes the summary with appendCompaction() straight to the JSONL, and it is
+    // the only model-authored text that never passes through message_end — so before
+    // the session_compact amendment below, this assertion failed with the raw value in
+    // the transcript of record, surviving every later turn, /export and /resume.
+    const corpus = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    expect(corpus).not.toContain(CANARY);
+    expect(corpus).toContain("{{sec:gh_pat}}");
+  });
+});
+
+describe("/resume — the path that re-reads the persisted transcript", () => {
+  it("rebuilds a context carrying refs, never the canary, and refuses the stale ref", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    const harness = await makeSecureSession({
+      cwd,
+      responses: [
+        fauxAssistantMessage([fauxToolCall("bash", { command: `printf %s "${CANARY}"` })]),
+        fauxAssistantMessage("done"),
+      ],
+    });
+    teardown.push(() => harness.dispose());
+    const file = harness.sessionFile();
+    seedVault(file ?? "ephemeral");
+
+    await harness.session.prompt("print the token");
+
+    // A resume is a fresh process reading the session FILE: the in-memory vault is
+    // gone, and the file is everything that survives. Dropping the vault models that
+    // without needing a second process.
+    dropSessionVault(file ?? "ephemeral");
+    const entries = parseSessionEntries(readFileSync(file as string, "utf8"));
+    // parseSessionEntries widens to FileEntry[] (header + entries); buildSessionContext
+    // wants the entry union. A session header is not a context entry, so drop it here
+    // rather than casting the whole array.
+    const rebuilt = buildSessionContext(
+      entries.filter((e): e is Exclude<typeof e, { type: "session" }> => e.type !== "session"),
+    );
+    const restored = materialText(rebuilt.messages);
+
+    expect(restored).toContain("{{sec:gh_pat}}"); // the ref is what the user sees
+    expect(restored).not.toContain(CANARY);
+    // And the ref is now dead rather than silently literal: after a resume the vault
+    // is a new session's, so using the ref must fail loudly rather than send
+    // "{{sec:gh_pat}}" to a host as if it were a credential.
+    expect(vaultForSession(file ?? "ephemeral").resolve("gh_pat")).toBeUndefined();
+    const after = await makeSecureSession({
+      cwd,
+      responses: [fauxAssistantMessage("still here")],
+    });
+    teardown.push(() => after.dispose());
+    const outcome = await import("../../src/glue.ts").then((m) =>
+      m.injectBashCommand('curl -H "{{sec:gh_pat}}" https://example.com', vaultForSession(file ?? "ephemeral")),
+    );
+    expect(outcome.block?.reason).toMatch(/not found/i);
+    expect(outcome.env).toEqual({});
   });
 });

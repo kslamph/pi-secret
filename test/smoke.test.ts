@@ -52,6 +52,9 @@ describe("extension entry", () => {
   });
 
   it("registers every hook the design depends on, at factory time", () => {
+    // session_compact is in this list because a compaction summary is the only
+    // model-authored text pi persists WITHOUT passing it through message_end — see
+    // src/index.ts. A refactor that dropped it would put summaries back on disk raw.
     const { api, calls } = stubPi();
     piSecure(api);
     expect(hookNames(calls).sort()).toEqual(
@@ -61,6 +64,7 @@ describe("extension entry", () => {
         "input",
         "message_end",
         "session_shutdown",
+        "session_compact",
         "session_start",
         "tool_call",
         "tool_result",

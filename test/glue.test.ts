@@ -3,7 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { Vault } from "../src/vault.ts";
-import { captureFromText, injectBashCommand, injectToolCall, scrubMessageText, scrubOutputSnapshot, scrubToolResult } from "../src/glue.ts";
+import {
+  captureFromText,
+  injectBashCommand,
+  injectToolCall,
+  scrubCompactionSummaryFile,
+  scrubMessageText,
+  scrubOutputSnapshot,
+  scrubToolResult,
+} from "../src/glue.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 const K = "4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c";
@@ -348,5 +356,94 @@ describe("the truncation snapshot pointer must survive scrubbing", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Review 2026-10-08: pi persists a compaction summary with appendCompaction(), writing
+ * a `type: "compaction"` entry straight to the session JSONL. It is model-authored text
+ * and the only such text that never passes through `message_end`, so nothing in the
+ * extension sees it before it is on disk. Measured: a summary repeating a vaulted value
+ * writes it verbatim, and it survives every later turn, /export and /resume.
+ */
+describe("the compaction summary entry", () => {
+  const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
+
+  const writeSession = (dir: string, summary: string): string => {
+    const file = join(dir, "s.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s1", cwd: dir }),
+        JSON.stringify({ type: "model_change", id: "e0", provider: "p", model: "m" }),
+        JSON.stringify({ type: "message", id: "e1", role: "user", content: "hi" }),
+        JSON.stringify({ type: "compaction", id: "e2", summary, firstKeptEntryId: "e1" }),
+        "",
+      ].join("\n"),
+    );
+    return file;
+  };
+  const summaryOf = (file: string): string | undefined => {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      try {
+        const e = JSON.parse(line) as { type?: string; id?: string; summary?: string };
+        if (e.type === "compaction" && e.id === "e2") return e.summary;
+      } catch {
+        /* header */
+      }
+    }
+    return undefined;
+  };
+  const vaultWith = () => {
+    const v = new Vault("t");
+    v.add("gh_pat", GH, "prompt");
+    return v;
+  };
+
+  it("rewrites a summary that carries the secret, leaving every other entry byte-identical", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    try {
+      const file = writeSession(dir, `the token is ${GH} and the ref is {{sec:gh_pat}}`);
+      const before = readFileSync(file, "utf8").split("\n");
+      const out = scrubCompactionSummaryFile(file, "e2", vaultWith());
+      expect(out).toEqual({ rewritten: true, hits: 1 });
+      const after = readFileSync(file, "utf8").split("\n");
+      expect(after[0]).toBe(before[0]);
+      expect(after[1]).toBe(before[1]);
+      expect(after[2]).toBe(before[2]);
+      expect(summaryOf(file)).toBe("the token is {{sec:gh_pat}} and the ref is {{sec:gh_pat}}");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not touch the file at all when the summary is already clean", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    try {
+      const file = writeSession(dir, "nothing sensitive, just {{sec:gh_pat}}");
+      const before = readFileSync(file, "utf8");
+      expect(scrubCompactionSummaryFile(file, "e2", vaultWith())).toEqual({ rewritten: false, hits: 0 });
+      expect(readFileSync(file, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores an unknown entry id rather than rewriting the wrong line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    try {
+      const file = writeSession(dir, `token ${GH}`);
+      const before = readFileSync(file, "utf8");
+      expect(scrubCompactionSummaryFile(file, "nope", vaultWith())).toEqual({ rewritten: false, hits: 0 });
+      expect(readFileSync(file, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports rather than throws when the file cannot be read", () => {
+    expect(
+      scrubCompactionSummaryFile(join(tmpdir(), "pi-secure-missing-session.jsonl"), "e2", vaultWith()),
+    ).toEqual({ rewritten: false, hits: 0 });
   });
 });

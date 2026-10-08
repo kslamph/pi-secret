@@ -1,4 +1,4 @@
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Vault } from "./vault.ts";
 import { bashRefIssues, expandBash, expandRefs, findRefs } from "./substitute.ts";
 import { redactAllText, scrubDeep, scrubText } from "./scrub.ts";
@@ -298,4 +298,101 @@ export function captureFromText(
     }
   }
   return { text: out.text, captured };
+}
+
+/**
+ * pi persists a compaction summary through `sessionManager.appendCompaction()`, which
+ * writes a `type: "compaction"` entry straight to the session JSONL. That summary is
+ * MODEL-AUTHORED text, and it is the one such text that never passes through
+ * `message_end` — so nothing in this extension ever sees it before it lands on disk.
+ * Measured (2026-10-08): a summary that repeats a vaulted value writes that value
+ * verbatim into the session file, and it survives every later turn, `/export` and
+ * `/resume`.
+ *
+ * The wire is safe — `context` and `before_provider_request` both scrub on the way out —
+ * but the file is the transcript of record, and a compaction summary is precisely the
+ * text that outlives the turn that produced it.
+ *
+ * So this amends the one entry, in place, and only when there is something to amend:
+ * hits === 0 returns immediately, so the overwhelmingly common case does not touch the
+ * user's session file at all.
+ *
+ * Safety, in order: the original content is held in memory, the rewrite goes to a temp
+ * file and is renamed over the target (pi appends with `appendFileSync(path)`, which
+ * reopens by path, so the inode swap is safe), and the result is re-read and verified.
+ * Any failure restores the original bytes and reports, because a half-written session
+ * file is worse than a leaky one.
+ */
+export function scrubCompactionSummaryFile(
+  file: string,
+  entryId: string,
+  vault: Vault,
+): { rewritten: boolean; hits: number } {
+  let original: string;
+  try {
+    original = readFileSync(file, "utf8");
+  } catch {
+    return { rewritten: false, hits: 0 };
+  }
+  const lines = original.split("\n");
+  let hits = 0;
+  let touched = false;
+  const out = lines.map((line) => {
+    if (!line.trim()) return line;
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return line; // header or a partial line: never ours to touch
+    }
+    if (entry.type !== "compaction" || entry.id !== entryId || typeof entry.summary !== "string") return line;
+    const scrubbed = scrubText(entry.summary, vault, { shapes: true });
+    if (!scrubbed.hits) return line;
+    hits += scrubbed.hits;
+    touched = true;
+    return JSON.stringify({ ...entry, summary: scrubbed.text });
+  });
+  if (!touched) return { rewritten: false, hits: 0 };
+
+  const tmp = `${file}.pisec-tmp`;
+  try {
+    writeFileSync(tmp, out.join("\n"));
+    renameSync(tmp, file);
+  } catch {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best effort */
+    }
+    try {
+      writeFileSync(file, original);
+    } catch {
+      /* the rename already failed, so the original is still in place */
+    }
+    return { rewritten: false, hits };
+  }
+  // Verify: a session file that silently lost an entry is a catastrophic outcome, and
+  // the only way to know is to read it back.
+  try {
+    const check = readFileSync(file, "utf8");
+    const entry = check
+      .split("\n")
+      .map((l) => {
+        try {
+          return JSON.parse(l) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find((e) => e?.type === "compaction" && e.id === entryId);
+    const summary = entry?.summary;
+    const ok =
+      typeof summary === "string" &&
+      check.split("\n").filter((l) => l.trim()).length === lines.filter((l) => l.trim()).length;
+    if (!ok) throw new Error("verification failed");
+  } catch {
+    writeFileSync(file, original);
+    return { rewritten: false, hits };
+  }
+  return { rewritten: true, hits };
 }
