@@ -51,8 +51,14 @@ pi install git:github.com/kslamph/pi-secure@vX.Y.Z
 
 Working: capture-on-paste, the `/sec` command family, masked entry, clipboard-only restore,
 `{{sec:NAME}}` expansion through bash (child env only) and other tool arguments, value-exact and
-shape scrubbing at `tool_result`, `message_end`, `context` and `before_provider_request`, and
-rewriting of pi's truncated-output snapshot.
+shape scrubbing at `tool_result`, `message_end`, `context` and `before_provider_request`, rewriting
+of pi's truncated-output snapshot, and amendment of compaction summaries in the session file (the one
+model-authored text pi persists without passing through `message_end`).
+
+The canary suite asserts on what actually leaves the machine, not only on files: pi-ai's real
+provider implementations invoke `options.onPayload` but the faux provider does not, so the harness
+injects that callback itself — otherwise `before_provider_request` would never run under test and the
+central claim above would be asserted by nothing.
 
 Known gaps, in rough order of how much they should worry you:
 
