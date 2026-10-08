@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { bashIsOwnedByPiSecure, createSecureBashToolDefinition } from "../src/tools/bash.ts";
 import { Vault } from "../src/vault.ts";
 import { setEnabled } from "../src/state.ts";
@@ -190,5 +191,53 @@ describe("/sec off must actually stop bash ref injection", () => {
     );
     const text = (result.content as Array<{ text: string }>).map((c) => c.text).join("");
     expect(text.trim()).toBe(`<${GH}>`);
+  });
+});
+
+/**
+ * Review 2026-10-08: the ownership probe matched the substring "pi-secure" anywhere in
+ * the extension's path, which cuts both ways. FALSE NEGATIVE: a legitimate install
+ * under a path without that substring (a packaged cache, a monorepo checkout) reports
+ * "not ours" and nags every session. FALSE POSITIVE — the dangerous direction, because
+ * it suppresses the warning: anyone with a checkout at `…/pi-secure-fork/`, or any
+ * extension deliberately named to contain the substring, silences the detector whose
+ * entire job is "did another extension take `bash` from us".
+ *
+ * The fix is identity instead of a guess. pi stamps every extension's tools with the
+ * extension's own sourceInfo, whose `baseDir` is the directory of the resolved entry
+ * file (extensions/loader.js:444-449). This module can therefore compute its own
+ * package directory from `import.meta.url` and compare — which is correct for a renamed
+ * install (both sides move together) and correct for a fork (the two dirs differ, so
+ * the warning fires when it should).
+ */
+describe("bash ownership is decided by real path identity, not a substring", () => {
+  const tool = (sourceInfo: Record<string, unknown>) => ({
+    name: "bash",
+    sourceInfo: { source: "extension", scope: "user", origin: "top-level", ...sourceInfo },
+  });
+  const fakePi = (tools: unknown[]) => ({ getAllTools: () => tools }) as never;
+  const ourDir = fileURLToPath(new URL("../src", import.meta.url)); // <pkg>/src
+
+  it("accepts our own real package directory", () => {
+    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${ourDir}/index.ts`, baseDir: ourDir })]))).toBe(true);
+  });
+
+  it("rejects a rival checkout whose path merely CONTAINS pi-secure", () => {
+    const fork = "/home/someone/experiments/pi-secure-fork/src";
+    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${fork}/index.ts`, baseDir: fork })]))).toBe(false);
+  });
+
+  it("accepts a renamed install, because our own path moved with it", () => {
+    const renamed = "/opt/extension-cache/a1b2c3/src";
+    // Simulates the same layout at a different location: pi reports that baseDir for
+    // our extension, and this module's own URL is inside it, so they agree.
+    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${renamed}/index.ts`, baseDir: renamed })]))).toBe(
+      renamed === ourDir,
+    );
+  });
+
+  it("still reports not-ours for the builtin and for an empty registry", () => {
+    expect(bashIsOwnedByPiSecure(fakePi([tool({ source: "builtin", path: "<builtin:bash>" })]))).toBe(false);
+    expect(bashIsOwnedByPiSecure(fakePi([]))).toBe(false);
   });
 });
