@@ -91,6 +91,21 @@ describe("the /sec list", () => {
     const heads = rows.slice(0, 2).map((r) => r.label.length);
     expect(heads[0]).toBe(heads[1]);
   });
+
+  it("keeps the detail column aligned when a name is longer than the column", () => {
+    // Without the cap this, one long name shifts every preview to its right and the list stops
+    // being scannable at all — which is the only reason the column exists.
+    const long = "a_secret_name_far_too_long_for_the_column";
+    const rows = secretRows([entry(long), entry("short")], { enabled: true, now: NOW });
+    const { ui, rendered } = fakeUi([["\x1b"]]);
+    void selectList({ ui } as never, "t", rows);
+    const lines = rendered.filter((l) => l.includes("len 40") || l.includes("len 40"));
+    const detailStarts = rendered
+      .filter((l) => l.includes("sha256") || l.includes("ghp_"))
+      .map((l) => l.search(/ghp_|sha256/));
+    expect(detailStarts.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(detailStarts).size).toBe(1);
+  });
 });
 
 describe("the per-entry actions", () => {

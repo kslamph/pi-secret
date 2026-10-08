@@ -128,6 +128,11 @@ export function selectList(
     return {
       render(width: number): string[] {
         const w = Math.max(24, width);
+        // One column width for the whole panel, derived from the labels. Letting an over-long
+        // name overflow pushes the detail column sideways and destroys the alignment that
+        // makes the list scannable — the one thing this menu exists for. The full name is
+        // still shown in the sub-menu title and in `/sec list`.
+        const column = Math.min(24, Math.max(8, ...rows.map((r) => r.label.length)));
         const lines: string[] = [];
         const add = (line = "") => lines.push(truncateToWidth(line, w));
         add(theme.fg("accent", "─".repeat(w)));
@@ -136,7 +141,8 @@ export function selectList(
         rows.forEach((row, i) => {
           if (row.separatorBefore) add();
           const pointer = i === cursor ? theme.fg("accent", "❯ ") : "  ";
-          const name = truncateToWidth(row.label, Math.max(8, w - 26));
+          const padded = row.label.length > column ? `${row.label.slice(0, column - 1)}…` : row.label;
+          const name = truncateToWidth(padded, column);
           const detail = row.detail ? theme.fg("dim", row.detail) : "";
           const gap = Math.max(1, w - name.length - detail.length - 4);
           add(` ${pointer}${name}${" ".repeat(gap)}${detail}`);
