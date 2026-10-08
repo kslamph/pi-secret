@@ -458,3 +458,46 @@ describe("scrubDeep must not fail open on deep nesting", () => {
     });
   });
 });
+
+// --- Review 2026-10-08, finding M2 -------------------------------------------------
+// The value pass writes a ref, and the shape pass then runs over the SAME buffer. The
+// KV alternative had a `(?!\{\{sec:)` lookahead; PREFIX_RE, JWT_RE and PEM_RE had no
+// equivalent. So a secret whose NAME is itself credential-shaped — reachable by
+// typing `/sec add sk-aaaa…`, and isValidName allows it — came back as
+// `{{sec:{{sec:redacted}}}}`: the name the model needs in order to reuse the secret
+// was destroyed by our own scrubber, in the same pass that created it.
+describe("the shape pass must never eat a ref we just wrote", () => {
+  it("keeps a credential-shaped secret name through the round trip", () => {
+    const v = new Vault("shaped-name");
+    v.add("sk-aaaaaaaaaaaaaaaaaaaaaaaa", "SUPER-SECRET-VALUE-1234567890", "prompt");
+    const once = scrubText("password=SUPER-SECRET-VALUE-1234567890", v, { shapes: true });
+    expect(once.text).toBe("password={{sec:sk-aaaaaaaaaaaaaaaaaaaaaaaa}}");
+    // And the model reads that ref back on a later turn and reuses it.
+    const twice = scrubText(once.text, v, { shapes: true });
+    expect(twice.text).toBe(once.text);
+  });
+
+  it("covers the sk-ant- branch too, not just plain sk-", () => {
+    // The prefix family is an alternation of a dozen branches and the guard has to
+    // sit in front of the whole thing, not inside one alternative. (JWT and PEM
+    // shapes cannot be produced as a NAME at all: isValidName forbids dots and
+    // dashes-plus-spaces, so those branches are unreachable from this bug.)
+    const v = new Vault("shaped-skant");
+    v.add("sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ANT-VALUE-abcdefghijklmnop_1234567890", "prompt");
+    const out = scrubText("token=ANT-VALUE-abcdefghijklmnop_1234567890", v, { shapes: true });
+    expect(out.text).toBe("token={{sec:sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaa}}");
+  });
+
+  it("still masks a real credential that merely sits next to a ref", () => {
+    // The fix must not turn "do not touch ref interiors" into "do not scrub here".
+    const v = new Vault("shaped-mixed");
+    v.add("gh_pat", "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8", "prompt");
+    const out = scrubText(
+      "Bearer {{sec:gh_pat}} and sk-51H8xY2ZvKYlo2CqXjTzWnB7",
+      v,
+      { shapes: true },
+    );
+    expect(out.text).toContain("{{sec:gh_pat}}");
+    expect(out.text).not.toContain("sk-51H8xY2ZvKYlo2CqXjTzWnB7");
+  });
+});

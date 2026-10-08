@@ -8,6 +8,18 @@ export interface SecretProvider {
 export interface ScrubOptions {
   /** Shape masking. Default true. Disable for file-content reads to avoid corrupting write-back. */
   shapes?: boolean;
+  /**
+   * Keys whose string values are left EXACTLY as they are, however credential-shaped
+   * they look.
+   *
+   * Exists for `details.fullOutputPath`, which is a filesystem pointer rather than
+   * model-facing text. Scrubbing it is not merely useless: if the path matches a
+   * shape, the pointer handed to `scrubOutputSnapshot` no longer exists, the rewrite
+   * fails, and the fail-closed branch deletes the pointer — correct for the model, but
+   * it leaves the UNSCRUBBED snapshot on disk with nothing pointing at it. A masked
+   * pointer converts a leak into an invisible one.
+   */
+  preserveKeys?: ReadonlySet<string>;
 }
 
 /** Result of a scrub pass over a string. */
@@ -349,9 +361,44 @@ export function maskValues(text: string, secrets: readonly string[]): ScrubResul
   return maskForms(text, collectForms(secrets, () => GENERIC));
 }
 
+import { REF_RE } from "./refs.ts";
+
+/**
+ * Spans of refs ALREADY present in the text, so the shape pass can leave their
+ * interiors alone.
+ *
+ * This exists because `scrubText` runs the value pass first: by the time shapes see
+ * the buffer, the value has already become `{{sec:NAME}}`. The KV alternative had a
+ * `(?!\{\{sec:)` lookahead, but PREFIX_RE / JWT_RE / PEM_RE had no equivalent — so a
+ * secret whose NAME is itself credential-shaped (reachable by typing
+ * `/sec add sk-aaaa…`; isValidName allows it) was destroyed by our own scrubber in
+ * the same pass that created it, becoming `{{sec:{{sec:redacted}}}}`. Stable and
+ * idempotent, and useless: the name the model needs in order to reuse the secret is
+ * gone, which breaks the design's round-trip property for that entry.
+ *
+ * A span check rather than another lookahead per alternative, because the prefix
+ * family is a dozen branches and a guard written inside one of them is a guard that
+ * silently stops applying to the other eleven.
+ */
+function existingRefSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  REF_RE.lastIndex = 0;
+  for (let m = REF_RE.exec(text); m !== null; m = REF_RE.exec(text)) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
+  return spans;
+}
+
 export function maskShapes(text: string): ScrubResult {
+  const refSpans = existingRefSpans(text);
   let hits = 0;
   const out = text.replace(SHAPE_RE, (match: string, ...rest: unknown[]) => {
+    // `rest` is [capture?, offset, string]; the offset is what decides whether this
+    // match lands inside a ref we must not touch.
+    const offset = rest[rest.length - 2];
+    if (typeof offset === "number" && refSpans.some(([s, e]) => offset < e && offset + match.length > s)) {
+      return match;
+    }
     // When the KV alternative matched, the credential is a capture group.
     const captured = typeof rest[0] === "string" ? (rest[0] as string) : undefined;
     const target = captured ?? match;
@@ -408,7 +455,12 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
  * Shallow-copies each container so the caller's object graph is never mutated, and
  * preserves non-string leaves and key order exactly as the recursive version did.
  */
-function walkDeep<T>(value: T, onString: (s: string) => string, onHit?: () => void): T {
+function walkDeep<T>(
+  value: T,
+  onString: (s: string) => string,
+  onHit?: () => void,
+  preserveKeys?: ReadonlySet<string>,
+): T {
   const isContainer = (n: unknown): n is Record<string, unknown> | unknown[] =>
     Array.isArray(n) || (n !== null && typeof n === "object");
   const clone = (n: Record<string, unknown> | unknown[]): Record<string, unknown> | unknown[] =>
@@ -432,6 +484,7 @@ function walkDeep<T>(value: T, onString: (s: string) => string, onHit?: () => vo
       continue;
     }
     const key = frame.keys[frame.i++]!;
+    if (preserveKeys?.has(key)) continue;
     const child = (frame.src as Record<string, unknown>)[key];
     if (typeof child === "string") {
       (frame.dst as Record<string, unknown>)[key] = onString(child);
@@ -459,6 +512,7 @@ export function scrubDeep<T>(value: T, vault: SecretProvider, opts?: ScrubOption
     () => {
       /* hits accumulates in the closure above */
     },
+    opts?.preserveKeys,
   );
   return { value: scrubbed, hits };
 }

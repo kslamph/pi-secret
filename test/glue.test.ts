@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -316,5 +316,37 @@ describe("injectToolCall — vaulted LITERALS in tool arguments", () => {
     const v = new Vault("t");
     v.add("short", "abc123", "prompt"); // 6 chars < MIN_SCRUBABLE_LENGTH
     expect(injectToolCall("bash", { command: "echo abc123" }, v).blocked).toBeUndefined();
+  });
+});
+
+/**
+ * Review 2026-10-08, finding M1: `scrubToolResult` scrubs `details` with the same
+ * generic string walk as content, so `details.fullOutputPath` — a PATH, not model-facing
+ * text — was itself eligible for masking. When the path happened to match a shape
+ * (a temp name containing `password=` or a token-shaped segment), the pointer handed to
+ * `scrubOutputSnapshot` no longer existed, the rewrite failed, and the contract's
+ * fail-closed branch DELETED the pointer — which is right for the model but means the
+ * UNSCRUBBED snapshot file stays on disk forever with nothing pointing at it. A masked
+ * pointer turns a leak into an invisible one.
+ */
+describe("the truncation snapshot pointer must survive scrubbing", () => {
+
+  it("leaves fullOutputPath untouched while still masking its file contents", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secure-path-"));
+    // A temp path that a credential-shape matcher would happily rewrite.
+    const file = join(dir, "password=ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8-out.txt");
+    writeFileSync(file, `full output follows\n${GH}\n`);
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    try {
+      const details: Record<string, unknown> = { fullOutputPath: file, truncation: {} };
+      const out = scrubToolResult({ toolName: "bash", content: [{ type: "text", text: "ok" }], details }, vault, { fileReads: false });
+      expect((out.details as Record<string, unknown>).fullOutputPath).toBe(file);
+      scrubOutputSnapshot(out.details, vault);
+      expect(readFileSync(file, "utf8")).not.toContain(GH);
+      expect(readFileSync(file, "utf8")).toContain("{{sec:gh_pat}}");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

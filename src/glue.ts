@@ -7,6 +7,7 @@ import { applyCapture, findCandidates, suggestNames, type CapturedItem } from ".
 import { MIN_SCRUBABLE_LENGTH } from "./refs.ts";
 
 const BLOCKED_IN_PATH = new Set(["read", "grep", "find", "ls"]);
+const PRESERVED_DETAIL_KEYS: ReadonlySet<string> = new Set(["fullOutputPath"]);
 const BLOCKED_IN_CONTENT = new Set(["write", "edit"]);
 
 export interface ToolCallLike {
@@ -169,7 +170,12 @@ export function scrubToolResult(
   const applyShapes = opts.fileReads || !/^(?:read|grep|find|ls)$/.test(event.toolName);
   try {
     const content = scrubDeep(event.content, vault, { shapes: applyShapes });
-    const details = event.details === undefined ? undefined : scrubDeep(event.details, vault, { shapes: applyShapes });
+    // fullOutputPath is a POINTER, not model-facing text: masking it would strand the
+    // unsanitised snapshot on disk (see ScrubOptions.preserveKeys).
+    const details =
+      event.details === undefined
+        ? undefined
+        : scrubDeep(event.details, vault, { shapes: applyShapes, preserveKeys: PRESERVED_DETAIL_KEYS });
     return {
       content: content.value as unknown[],
       details: details?.value,
