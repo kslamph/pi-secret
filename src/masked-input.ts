@@ -1,5 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
+import { Container, Input, Key, Spacer, Text, matchesKey } from "@earendil-works/pi-tui";
+import { DynamicBorder, keyHint } from "@earendil-works/pi-coding-agent";
 
 export interface MaskState {
   buf: string;
@@ -14,7 +16,7 @@ export function emptyMaskState(): MaskState {
 // Terminal escape sequences: CSI (arrows, home/end, SGR mouse reports, bracketed
 // paste), SS3 (F1–F4), and charset/mode selectors. All are keypresses the user did
 // not mean as text, and none of them is the cancel key.
-const ESCAPE_SEQUENCES = /\x1b\[[0-9;?"<>]*[ -/]*[@-~]|\x1bO[A-Za-z0-9]|\x1b[()][0-9A-Za-z]|\x1b[=>78MDEHc]/g;
+const ESCAPE_SEQUENCES = /\x1b\[[0-9;?:"<>]*[ -/]*[@-~]|\x1bO[A-Za-z0-9]|\x1b[()][0-9A-Za-z]|\x1b[=>78MDEHc]/g;
 const LONE_ESC = /\x1b/g;
 
 const PASTE_ON = "\x1b[200~";
@@ -58,6 +60,17 @@ export function applyInput(state: MaskState, data: string): MaskState {
     return { buf, cursor: buf.length, status: "editing" };
   }
 
+  // Navigation keys are accepted but ignored. The mask keeps the cursor pinned at the end and
+  // only the buffer matters, so honoring arrows here would need a second cursor model in the
+  // model that owns the value — a larger change than the complaint is worth. The critical
+  // part is that these sequences do NOT fall through to the printable filter, where the
+  // sequence's digits (`1;1:1A`) would be typed into the secret itself.
+  const NAV = [Key.left, Key.right, Key.up, Key.down, Key.home, Key.end, Key.delete, Key.pageUp, Key.pageDown, Key.tab];
+  if (NAV.some((k) => matchesKey(data, k))) {
+    return { buf, cursor: buf.length, status: "editing" };
+  }
+
+
   // available here: the user concludes nothing was stored and may paste the token
   // somewhere unprotected instead.
   const cleaned = stripNoise(data);
@@ -81,17 +94,44 @@ export function applyInput(state: MaskState, data: string): MaskState {
   return { buf, cursor: buf.length, status: "editing" };
 }
 
-/** Deliberately ignores the value: renders `•` × length plus a live length. */
-export function renderMasked(state: MaskState, title: string, width: number): string[] {
-  const dots = "•".repeat(state.buf.length);
-  const clipped = dots.length > Math.max(0, width - 12) ? dots.slice(-Math.max(0, width - 12)) : dots;
-  return [
-    title.slice(0, width),
-    clipped || " ".repeat(1),
-    // The hint must be true for the terminal the user is actually on. Kitty-protocol
-    // terminals send ESC as `\x1b[27u`, which is exactly the case the old hint got wrong.
-    `len ${state.buf.length} · enter to store · esc or ctrl+c to cancel`.slice(0, width),
-  ];
+/**
+ * The mask is applied by feeding the SHARED `Input` component a row of bullets and keeping the
+ * real value in our own buffer.
+ *
+ * The chrome — border, accent title, the input line with its cursor, the key hints — is pi's own
+ * `DynamicBorder` / `Text` / `Input` / `keyHint`, assembled in the same order as
+ * `ExtensionInputComponent`, which is what `ctx.ui.input` renders for the NAME step of this very
+ * flow. Hand-drawing a lookalike was the mistake: it drifted in position (a centred transparent
+ * overlay floating over the scrollback) and in style, so one flow read as two applications.
+ *
+ * The value never reaches a rendered node: the only thing the input line ever holds is bullets.
+ * Deliberately absent: any character of the real value, in any intermediate state.
+ */
+/** The two things the component needs from a theme: colour for accent and plain text. */
+export interface MaskTheme {
+  fg(color: string, text: string): string;
+}
+
+function maskedDialog(theme: MaskTheme, title: string, length: number, bullets: string): Container {
+  const input = new Input({ placeholder: "paste is fine — it is never echoed" });
+  input.setValue(bullets);
+  const container = new Container();
+  container.addChild(new DynamicBorder());
+  container.addChild(new Spacer(1));
+  container.addChild(new Text(theme.fg("accent", title), 1, 0));
+  container.addChild(new Spacer(1));
+  container.addChild(input);
+  container.addChild(new Spacer(1));
+  container.addChild(
+    new Text(
+      `${keyHint("tui.select.confirm", "store")}  ${keyHint("tui.select.cancel", "cancel")}  len ${length}`,
+      1,
+      0,
+    ),
+  );
+  container.addChild(new Spacer(1));
+  container.addChild(new DynamicBorder());
+  return container;
 }
 
 export async function promptMaskedSecret(
@@ -99,37 +139,41 @@ export async function promptMaskedSecret(
   title: string,
 ): Promise<string | undefined> {
   if (ctx.mode !== "tui" || !ctx.hasUI) return undefined;
-  // `overlay: true` puts this in the same visual family as the built-in dialogs (pi's
-  // `ctx.ui.input` for the name, `select`, `confirm`). Without it the component is dropped
-  // INTO the editor container, so the two halves of one flow — name, then value — looked like
-  // two unrelated pieces of software.
+  // NOT `overlay: true`. pi's built-in `input`/`select`/`confirm` render into the editor
+  // container, at the bottom of the screen; `custom({overlay: true})` centres a transparent
+  // panel over the scrollback instead, which is what made this prompt collide with the
+  // context block. Same placement, same parts, only the masking is ours.
   const result = await ctx.ui.custom<{ value?: string }>((_tui, theme, _kb, done) => {
     let state = emptyMaskState();
-    let dirty = true;
-    const finish = () => {
-      if (state.status === "submit") done({ value: state.buf });
-      else done({});
-      state = { buf: "", cursor: 0, status: state.status }; // drop the buffer ASAP
-    };
+    // The visible view is rebuilt after every keystroke: the only thing the input line ever
+    // holds is bullets, so there is no frame in which the value exists in rendered form.
+    let view: Component = maskedDialog(theme, title, 0, "");
+    let settled = false;
     return {
       render(width: number) {
-        const lines = renderMasked(state, title, width);
-        return lines.map((l, i) => (i === 1 ? theme.fg("toolTitle", l) : theme.fg("muted", l)));
+        return view.render(width);
       },
-      invalidate() {
-        dirty = true;
-      },
+      invalidate() {},
       handleInput(data: string) {
+        if (settled) return;
         const previous = state.status;
         state = applyInput(state, data);
-        dirty = true;
-        if (state.status !== previous) finish();
+        if (state.status === previous) {
+          view = maskedDialog(theme, title, state.buf.length, "•".repeat(state.buf.length));
+          return;
+        }
+        settled = true;
+        // Drop the buffer before resolving: it must not outlive the prompt by even one tick.
+        const value = state.status === "submit" ? state.buf : "";
+        state = { buf: "", cursor: 0, status: "cancel" };
+        view = maskedDialog(theme, title, 0, "");
+        done(value ? { value } : {});
       },
       dispose() {
         state = { buf: "", cursor: 0, status: "cancel" };
       },
     };
-  }, { overlay: true });
+  });
   const value = result?.value;
   return value && value.trim() ? value : undefined;
 }
