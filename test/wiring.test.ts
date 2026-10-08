@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSecure from "../src/index.ts";
@@ -27,7 +28,15 @@ function harness() {
         name: (t as { name: string }).name,
         description: "",
         parameters: {},
-        sourceInfo: { path: "pi-secure", source: "extension", scope: "user", origin: "top-level", baseDir: undefined },
+        // The REAL entry path: the ownership check compares resolved files, so a stub that
+        // invents a path would report "not ours" and every session would warn falsely.
+        sourceInfo: {
+          path: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
+          source: "extension",
+          scope: "user",
+          origin: "top-level",
+          baseDir: undefined,
+        },
       })),
     setActiveTools: vi.fn(),
     getActiveTools: () => ["bash", "read"],

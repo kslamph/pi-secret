@@ -123,10 +123,19 @@ export default function piSecure(pi: ExtensionAPI): void {
     }
 
     if (!ownsBash(pi)) {
-      ctx.ui.notify(
-        "pi-secure: another extension owns `bash`, so {{sec:…}} refs will NOT expand. Load pi-secure after it, or disable that extension.",
-        "error",
-      );
+      // Best-effort, like appendReceipt above: a UI context without notify must not cost
+      // the user their session, and this is a diagnostic rather than something they can act
+      // on mid-startup anyway.
+      try {
+        ctx.ui.notify(
+          "pi-secure: another extension owns `bash`, so {{sec:…}} refs will NOT expand. " +
+            "Extension load order decides this — first registration of a tool name wins — " +
+            "so load pi-secure before the other extension, or disable it.",
+          "error",
+        );
+      } catch {
+        /* no UI to tell; the failure mode is visible anyway the moment a ref is used */
+      }
     }
     if (ctx.hasUI) ctx.ui.setStatus("pi-secure", `sec: ${vault(ctx).size()} active`);
   });

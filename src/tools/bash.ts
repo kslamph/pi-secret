@@ -1,4 +1,5 @@
 import { createBashToolDefinition, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Vault } from "../vault.ts";
 import { injectBashCommand } from "../glue.ts";
@@ -85,50 +86,58 @@ export function createSecureBashToolDefinition(cwd: string, options: SecureBashO
   return withScrubbedUpdates(def, options.vault);
 }
 
-export function registerSecureBash(pi: ExtensionAPI, cwd: string, options: SecureBashOptions): void {
-  // createBashToolDefinition already carries promptSnippet, promptGuidelines,
-  // renderCall and renderResult, so registering it preserves built-in presentation.
-  pi.registerTool(createSecureBashToolDefinition(cwd, options) as unknown as ToolDefinition);
-}
 
 /**
- * Our own package directory, computed from this module's URL rather than assumed from
- * the package name: this file is `<pkg>/src/tools/bash.ts`, so one level up is
- * `<pkg>/src` — the directory pi reports as an extension's `sourceInfo.baseDir`.
+ * Identity by FILE, not by directory or by substring.
+ *
+ * Node resolves a module to its real path, so `import.meta.url` here is the checkout,
+ * while pi reports whatever path it loaded the extension FROM. Under `pi install <path>`
+ * those differ: pi creates a link under the agent dir, Node resolves through it, and the two
+ * strings never match. An earlier version compared directories and fell back to matching
+ * /pi-secure/ in the path when `baseDir` was absent — which is most of the time, since pi's
+ * synthetic sourceInfo for a file-loaded extension carries path/source/scope/origin and no
+ * baseDir. The result was a warning on every symlinked install telling the user their refs
+ * would not expand while they were expanding perfectly well. A field report, not a theory.
+ *
+ * So: realpath both sides and compare the extension ENTRY file. That is exact for every
+ * install layout — renamed directory, package cache, symlink, relocated checkout — and it
+ * cannot be spoofed by a path that merely looks like ours.
  */
-const OUR_PACKAGE_SRC_DIR = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+const OUR_ENTRY = resolveRealPath(fileURLToPath(new URL("../index.ts", import.meta.url)));
+
+/** realpath with a fallback to the input, so an unreadable path degrades instead of throwing. */
+function resolveRealPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
 
 /**
  * Did our `bash` actually win?
  *
- * Verified in pi source: extension tools DO replace built-ins, but among *extensions*
- * the first registration of a name wins, so another loaded extension that also registers
- * `bash` can beat us silently. That failure mode is invisible — refs would then reach
- * the child as literal `{{sec:…}}` text with no error from pi at all — so it is
- * detected explicitly and Task 10 turns a false result into a loud notify().
+ * Verified in pi source: extension tools DO replace built-ins, but among *extensions* the
+ * first registration of a name wins, so another loaded extension that also registers `bash`
+ * can beat us silently. That failure mode is invisible — refs would then reach the child as
+ * literal `{{sec:…}}` text with no error from pi at all — so it is detected explicitly and
+ * session_start turns a false result into a loud notify().
+ *
  * `source !== "builtin"` alone is NOT enough: a rival extension's tool carries
- * `source: "extension"` too.
- *
- * The decision is PATH IDENTITY, not a substring test. pi stamps every extension's
- * tools with that extension's own sourceInfo, whose `baseDir` is the directory of the
- * resolved entry file (extensions/loader.js:444-449), so comparing it against this
- * module's own package directory is exact in both directions:
- *  - a renamed or relocated install still matches, because both sides move together.
- *    A `/pi-secure/` substring test reported "not ours" for any install outside a
- *    directory named pi-secure, which is a nag on every session for no security gain.
- *  - a DIFFERENT extension whose path merely CONTAINS the substring "pi-secure" (a
- *    fork at `.../pi-secure-fork/`, or a name chosen to defeat this check) does not
- *    match. This is the direction that matters: matching it would suppress the very
- *    warning that exists, which is the silent-insecure-success case.
- *
- * A synthetic path (`<builtin:...>`-style, no baseDir) falls back to the historical
- * substring check, so behaviour on those shapes is unchanged. Fail-safe overall: a
- * wrong "not ours" produces a loud notify, never a silent insecure success.
+ * `source: "extension"` (or `"cli"`, or a scope name) too, which is why identity is decided
+ * by comparing paths rather than by reading a source label.
  */
 export function bashIsOwnedByPiSecure(pi: ExtensionAPI): boolean {
   const effective = pi.getAllTools().find((t) => t.name === "bash");
+  // No bash at all, or still the builtin: we did not register, or registration did not take.
   if (!effective || effective.sourceInfo.source === "builtin") return false;
-  const { path, baseDir } = effective.sourceInfo;
-  if (typeof baseDir === "string" && baseDir.length > 0) return baseDir === OUR_PACKAGE_SRC_DIR;
-  return /pi-secure/.test(path);
+  const path = effective.sourceInfo.path;
+  if (typeof path !== "string" || path.length === 0) return false;
+  return resolveRealPath(path) === OUR_ENTRY;
+}
+
+export function registerSecureBash(pi: ExtensionAPI, cwd: string, options: SecureBashOptions): void {
+  // createBashToolDefinition already carries promptSnippet, promptGuidelines,
+  // renderCall and renderResult, so registering it preserves built-in presentation.
+  pi.registerTool(createSecureBashToolDefinition(cwd, options) as unknown as ToolDefinition);
 }

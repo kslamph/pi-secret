@@ -1,3 +1,6 @@
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
 import { bashIsOwnedByPiSecure, createSecureBashToolDefinition } from "../src/tools/bash.ts";
@@ -5,6 +8,9 @@ import { Vault } from "../src/vault.ts";
 import { setEnabled } from "../src/state.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
+/** This package's own source directory and extension entry, as the real registry reports them. */
+const ourDir = fileURLToPath(new URL("../src", import.meta.url));
+const ourEntry = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 
 /**
  * pi 0.85.1's resolveSpawnContext dereferences `ctx.sessionManager` whenever `ctx`
@@ -52,12 +58,16 @@ describe("secure bash tool definition", () => {
   });
 
   it("reports whether our bash definition actually won registration", () => {
+    // The real registry always carries a RESOLVED file path (measured against pi 0.85.1:
+    // sourceInfo is {path, source, scope, origin} and usually no baseDir at all). The old
+    // version of this test used the bare string "pi-secure", which only the substring check
+    // ever matched — a shape pi never produces.
     const owned = [
       {
         name: "bash",
         sourceInfo: {
           source: "extension",
-          path: "pi-secure",
+          path: ourEntry,
           scope: "user",
           origin: "top-level",
           baseDir: undefined,
@@ -216,10 +226,40 @@ describe("bash ownership is decided by real path identity, not a substring", () 
     sourceInfo: { source: "extension", scope: "user", origin: "top-level", ...sourceInfo },
   });
   const fakePi = (tools: unknown[]) => ({ getAllTools: () => tools }) as never;
-  const ourDir = fileURLToPath(new URL("../src", import.meta.url)); // <pkg>/src
 
   it("accepts our own real package directory", () => {
     expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${ourDir}/index.ts`, baseDir: ourDir })]))).toBe(true);
+  });
+
+  it("accepts a SYMLINKED install, which is how `pi install <path>` wires it up", () => {
+    // The false alarm a user hit in the field, and the reason the check was rewritten.
+    //
+    // Node resolves a module to its REAL path, so `import.meta.url` inside this file is the
+    // checkout, while pi reports whatever path it loaded the extension FROM — the symlink
+    // pi created under the agent dir. Comparing directories therefore mismatched on every
+    // symlinked install, and the user was told their refs would not expand while they were
+    // expanding perfectly well. The earlier fallback (matching /pi-secure/ in the path) only
+    // masked it when the link happened to be named pi-secure.
+    //
+    // pi's synthetic sourceInfo also frequently has NO baseDir at all (measured: path,
+    // source, scope, origin only), which is what forced that fallback in the first place.
+    const dir = mkdtempSync(join(tmpdir(), "pi-secure-link-"));
+    const link = join(dir, "installed-name-without-the-word-secure");
+    symlinkSync(join(ourDir, "index.ts"), link);
+    try {
+      expect(realpathSync(link)).toBe(realpathSync(ourEntry));
+      expect(bashIsOwnedByPiSecure(fakePi([tool({ path: link, baseDir: undefined })]))).toBe(true);
+      expect(bashIsOwnedByPiSecure(fakePi([tool({ path: link, baseDir: dir })]))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still reports a lost race against a real rival path", () => {
+    // The flip side: precision must not become permissiveness.
+    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: "/home/someone/other-ext/index.ts", baseDir: undefined })]))).toBe(
+      false,
+    );
   });
 
   it("rejects a rival checkout whose path merely CONTAINS pi-secure", () => {
