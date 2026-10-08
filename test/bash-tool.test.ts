@@ -176,7 +176,7 @@ describe("/sec off must actually stop bash ref injection", () => {
     expect(text).toContain("ok");
   });
 
-  it("expands again after /sec on", async () => {
+  it("expands again after /sec on, for values added after the off", async () => {
     setEnabled(false);
     setEnabled(true);
     const vault = new Vault("t");
