@@ -20,20 +20,50 @@ Round-trip property: masking replaces a value with **the ref**, not `***`. When 
 
 Secrets live in memory for the current session only — never persisted, never reused across `/new`, `/fork`, `/resume`.
 
-## `/sec` commands
+## `/sec`
 
-One command, `/sec`, with eight subcommands:
+One command, and with no arguments it opens a **menu** — you should never have to remember a
+subcommand:
 
-| Subcommand | Effect |
+```
+/sec
+```
+
+```
+─ pi-secure — this session only ─────────────────────────────
+
+  ❯ gh_pat        ghp_A1b2…Q7R8 · len 40 · paste · 2m ago
+    db_url        sha256:a1b2c3d4 · len 41 · prompt · 1h ago
+
+    Add a secret…                                        a
+    Disable for this session                            t · clears the values
+
+ ↑/↓ move · enter select · a/t shortcuts · esc close
+```
+
+Enter on a secret opens what you can do with it:
+
+| Row | Key | What it does |
+|---|---|---|
+| Copy value to clipboard | `c` | The only way to see the value. It goes to your clipboard, never to the editor line — typing it there would persist it in the transcript. |
+| Rename… | `r` | Asks for the new name, validated before anything moves. |
+| Remove from this session | `d` | Asks for confirmation first. |
+| Back | `esc` | |
+
+`Add a secret…` asks for a name, then shows the masked prompt where every character renders as
+`•`; the length and preview are shown on confirm. `Disable for this session` (`t`) stops ref
+injection and capture and **clears the values**; `Enable` re-enables the mechanism but does not
+restore them.
+
+Without a terminal to draw a menu in (headless, scripted), `/sec` prints the same list as text.
+The argument form still works everywhere and is the escape hatch:
+
+| Form | Effect |
 |---|---|
-| `/sec add <name>` | Enter a value via a masked prompt (characters render as `•`); length + fingerprint shown on confirm. This session only. |
-| `/sec list` | List entries: name, a masked preview (`ghp_A1b2…Q7R8`), length, provenance. Never the value. |
-| `/sec remove NAME` | Remove an entry from the vault. |
-| `/sec rename OLD NEW` | Rename an entry. |
-| `/sec test NAME` | Reprint a secret's masked preview + length so you can confirm at a glance which key it is, without echoing it. |
-| `/sec restore NAME` | Copy a captured value back to your clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
-| `/sec off` | Suspend ref injection and capture for this session, and **clear this session's values**. A bash command containing `{{sec:…}}` is **refused** with a reason (it is not run with a literal placeholder, which would look like a working credential). Output scrubbing deliberately stays on — masking is a filter, not a capability: extra masking can only cost context, un-masking would leak. `/sec on` re-enables the mechanism but does **not** restore the values; re-add them with `/sec add`. |
-| `/sec on` | Re-enable pi-secure after `/sec off`. |
+| `/sec add <name>` | Masked prompt, then store. This session only. |
+| `/sec list` | Name, masked preview, length, source and time, one per line. |
+| `/sec remove <name>` / `/sec rename <old> <new>` | Forget or rename. |
+| `/sec restore <name>` | Copy the value to the clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
 
 Pasting a credential into the conversation also works: high-confidence secrets are captured into the vault and rewritten to a ref before anything is persisted, with a receipt line left in the transcript (name, length, fingerprint — never the value).
 

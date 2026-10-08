@@ -4,14 +4,21 @@ import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
 import { setEnabled } from "./state.ts";
 import { secretLabel } from "./preview.ts";
+import { canShowMenu, entryRows, secretRows, selectList, type SecAction } from "./menu.ts";
+import { isEnabled } from "./state.ts";
 import type { PublicEntry } from "./vault.ts";
 
 /** The public entry carries its own preview; short values fall back to the digest. */
 const labelOf = (e: PublicEntry): string => e.preview ?? `sha256:${e.fingerprint}`;
 
-const SEC_USAGE = "usage: /sec add|list|remove|rename|test|restore|off|on [name]";
+const SEC_USAGE = "usage: /sec [add <name> | list | remove <name> | rename <old> <new> | restore <name> | off | on]";
 
-const VERBS = ["add ", "list", "remove ", "rename ", "test ", "restore ", "off", "on"];
+// Argument form. The MENU is the primary surface — `/sec` with no arguments opens it — and
+// this list exists as the escape hatch for scripting, for headless sessions where there is no
+// menu to draw, and for the completion provider. `test` used to be here; it printed one entry
+// with a timestamp, which is now a column in the list, so it was redundant and confusingly
+// named (it never contacted any provider, so "test" invited an expectation it never met).
+const VERBS = ["add ", "list", "remove ", "rename ", "restore ", "off", "on"];
 
 /**
  * One dispatcher rather than eight commands: pi's `registerCommand` takes a bare
@@ -20,7 +27,7 @@ const VERBS = ["add ", "list", "remove ", "rename ", "test ", "restore ", "off",
  */
 export function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("sec", {
-    description: "Manage this session's secrets: add | list | remove | rename | test | restore | off | on",
+    description: "This session's secrets — opens a menu; or add | list | remove | rename | restore | off | on",
     getArgumentCompletions: (prefix: string) => {
       const trimmed = prefix.trim();
       const items = VERBS.map((v) => ({ value: v, label: `/sec ${v.trim()}` })).filter(
@@ -43,20 +50,21 @@ export async function runSecCommand(
   const arg = rest.join(" ").replace(/^sec:/, "");
   switch (verb) {
     case "":
+      // No arguments: the menu, when there is a terminal to draw one in. Otherwise the same
+      // content as plain text, so headless and scripted use still work.
+      if (canShowMenu(ctx)) {
+        await runSecMenu(ctx, vault);
+        return;
+      }
+      ctx.ui.notify(`${formatSecretList(vault.entries())}\n${SEC_USAGE}`, "info");
+      return;
+
     case "help":
       ctx.ui.notify(SEC_USAGE, "info");
       return;
 
     case "list": {
-      const entries = vault.entries();
-      ctx.ui.notify(
-        entries.length
-          ? entries
-              .map((e) => `sec:${e.name} · ${labelOf(e)} · len ${e.length} · ${e.source}`)
-              .join("\n")
-          : "no secrets in this session",
-        "info",
-      );
+      ctx.ui.notify(formatSecretList(vault.entries()), "info");
       return;
     }
 
@@ -112,19 +120,6 @@ export async function runSecCommand(
       return;
     }
 
-    case "test": {
-      const entry = vault.get(arg);
-      // Length + a truncated label: this is how a capture is confirmed without
-      // echoing the value back into the terminal or the transcript.
-      ctx.ui.notify(
-        entry
-          ? `sec:${arg} · ${labelOf(entry)} · len ${entry.length} · added ${new Date(entry.addedAt).toISOString()}`
-          : `sec:${arg} is not in this session`,
-        entry ? "info" : "warning",
-      );
-      return;
-    }
-
     case "restore": {
       const [{ restoreSecret }, { copyToClipboard }] = await Promise.all([
         import("./restore.ts"),
@@ -164,5 +159,121 @@ export async function runSecCommand(
 
     default:
       ctx.ui.notify(`unknown subcommand "${verb}" — ${SEC_USAGE}`, "warning");
+  }
+}
+
+/** The plain-text form of the list, shared by `/sec list` and by a headless `/sec`. */
+export function formatSecretList(entries: readonly PublicEntry[]): string {
+  if (!entries.length) return "no secrets in this session";
+  return entries
+    .map(
+      (e) =>
+        `sec:${e.name} · ${labelOf(e)} · len ${e.length} · ${e.source} · added ${new Date(e.addedAt).toISOString()}`,
+    )
+    .join("\n");
+}
+
+/**
+ * The `/sec` menu loop.
+ *
+ * Two levels and a loop rather than one long verb string: the top level is what the user sees
+ * when they type `/sec`, and every action lives one keypress away from there. Rename and
+ * removal use the BUILT-IN input and confirm dialogs instead of hand-rolled ones — they need
+ * no shortcuts, and reusing them means one less input implementation to keep correct.
+ */
+export async function runSecMenu(ctx: ExtensionCommandContext, vault: Vault): Promise<void> {
+  for (;;) {
+    const choice = await selectList(
+      ctx,
+      "pi-secure — this session only",
+      secretRows(vault.entries(), { enabled: isEnabled() }),
+      { a: { kind: "add" }, t: { kind: "toggle" } },
+    );
+    if (!choice) return;
+    if (choice.kind === "add") {
+      await addViaMenu(ctx, vault);
+      continue;
+    }
+    if (choice.kind === "toggle") {
+      setEnabled(!isEnabled());
+      if (isEnabled()) {
+        // Re-enabling never restores values: /sec off cleared them, and silently bringing
+        // secrets back would make the switch meaningless.
+        ctx.ui.notify("pi-secure enabled — add secrets again with /sec", "info");
+      } else {
+        dropActiveVault();
+        ctx.ui.notify("pi-secure disabled and this session's values were cleared", "warning");
+      }
+      continue;
+    }
+    if (choice.kind === "entry") {
+      await entryMenuLoop(ctx, vault, choice.name);
+      continue;
+    }
+  }
+}
+
+async function entryMenuLoop(
+  ctx: ExtensionCommandContext,
+  vault: Vault,
+  name: string,
+): Promise<void> {
+  for (;;) {
+    const choice = await selectList(ctx, `sec:${name}`, entryRows(name), {
+      c: { kind: "copy", name },
+      r: { kind: "rename", name },
+      d: { kind: "remove", name },
+    });
+    if (!choice || choice.kind === "back") return;
+    if (choice.kind === "copy") {
+      await runSecCommand(`restore ${name}`, vault, ctx);
+      continue;
+    }
+    if (choice.kind === "rename") {
+      const next = await ctx.ui.input(`Rename sec:${name}`, "new name");
+      if (next === undefined) continue;
+      const target = next.trim().replace(/^sec:/, "");
+      if (!isValidName(target)) {
+        ctx.ui.notify(`invalid name (want /^[a-z][a-z0-9_-]{0,63}$/)`, "warning");
+        continue;
+      }
+      try {
+        await runSecCommand(`rename ${name} ${target}`, vault, ctx);
+      } catch {
+        /* runSecCommand already reported it */
+      }
+      return;
+    }
+    if (choice.kind === "remove") {
+      const ok = await ctx.ui.confirm("Remove secret", `Remove sec:${name} from this session?`);
+      if (ok) await runSecCommand(`remove ${name}`, vault, ctx);
+      continue;
+    }
+  }
+}
+
+/** Add from the menu: name first (validated before any prompt), then the masked value. */
+async function addViaMenu(ctx: ExtensionCommandContext, vault: Vault): Promise<void> {
+  const entered = await ctx.ui.input("New secret name", "github_token");
+  if (entered === undefined) return;
+  const name = entered.trim().replace(/^sec:/, "");
+  if (!isValidName(name)) {
+    ctx.ui.notify(`invalid name (want /^[a-z][a-z0-9_-]{0,63}$/)`, "warning");
+    return;
+  }
+  if (vault.has(name)) {
+    ctx.ui.notify(`sec:${name} already exists — rename or remove it first`, "warning");
+    return;
+  }
+  const value = await promptMaskedSecret(ctx, `Value for sec:${name} — paste is fine, it is never echoed`);
+  if (value === undefined) {
+    ctx.ui.notify("cancelled — nothing was stored", "info");
+    return;
+  }
+  try {
+    const entry = vault.add(name, value, "prompt");
+    ctx.ui.notify(`captured sec:${entry.name} · ${labelOf(entry)} · len ${entry.length} · this session only`, "info");
+  } catch (error) {
+    ctx.ui.notify(`not stored: ${error instanceof Error ? error.message : String(error)}`, "error");
   }
 }

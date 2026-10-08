@@ -259,17 +259,19 @@ describe("/sec dispatcher", () => {
     expect(input).not.toHaveBeenCalled();
   });
 
-  it("renames, and identifies an entry by its masked preview", async () => {
+  it("renames, and lists the entry by its masked preview", async () => {
     const vault = new Vault("t");
     vault.add("old", GH, "prompt");
     const notify = vi.fn();
     await runSecCommand("rename old new", vault, { ui: { notify } } as never);
     expect(vault.resolve("new")).toBe(GH);
-    await runSecCommand("test new", vault, { ui: { notify } } as never);
+    await runSecCommand("list", vault, { ui: { notify } } as never);
     const last = notify.mock.calls.at(-1)![0] as string;
     // This is the whole point of the change: a person can tell which key this is. A digest
-    // was safe and unreadable, which made "confirm the capture" a formality.
+    // was safe and unreadable, which made "confirm the capture" a formality. The timestamp
+    // lives here too now, which is why `/sec test` no longer exists as a separate verb.
     expect(last).toMatch(/ghp_A1b2…Q7R8/);
+    expect(last).toMatch(/added \d{4}-\d{2}-\d{2}T/);
     expect(last).not.toContain(GH);
   });
 
@@ -277,10 +279,21 @@ describe("/sec dispatcher", () => {
     const vault = new Vault("t");
     vault.add("pw", "correct-horse-battery", "prompt");
     const notify = vi.fn();
-    await runSecCommand("test pw", vault, { ui: { notify } } as never);
+    await runSecCommand("list", vault, { ui: { notify } } as never);
     const last = notify.mock.calls.at(-1)![0] as string;
     expect(last).toMatch(/sha256:[0-9a-f]{4}/);
     expect(last).not.toContain("horse");
+  });
+
+  it("no longer accepts the `test` verb, and says what the usage is instead", async () => {
+    // It was redundant with `list` (one field of difference) and its name implied it would
+    // contact a provider, which it never did.
+    const notify = vi.fn();
+    await runSecCommand("test new", new Vault("t"), { ui: { notify } } as never);
+    const last = notify.mock.calls.at(-1)![0] as string;
+    expect(last).toMatch(/unknown subcommand/);
+    // The word appears only in the rejection itself; the usage line must not offer it.
+    expect(last.slice(last.indexOf("usage:"))).not.toMatch(/\btest\b/);
   });
 
   it("routes an unknown subcommand to usage, not a crash", async () => {
