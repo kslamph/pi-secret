@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { activeVault, type Vault } from "./vault.ts";
+import { activeVault, dropActiveVault, type Vault } from "./vault.ts";
 import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
 import { setEnabled } from "./state.ts";
@@ -139,7 +139,17 @@ export async function runSecCommand(
 
     case "off":
       setEnabled(false);
-      ctx.ui.notify("pi-secure disabled for this session — refs will not expand", "warning");
+      // The values go too. Leaving them in memory would mean "off" stopped handing out
+      // new capabilities while every existing ref stayed spendable, which is not what
+      // someone who just typed `/sec off` is asking for. Output scrubbing deliberately
+      // stays ON: masking is a filter, not a capability — extra masking can only cost the
+      // model context it was going to lose anyway, while un-masking would leak.
+      dropActiveVault();
+      ctx.ui.notify(
+        "pi-secure disabled for this session — refs will not expand, and this session's values were cleared. " +
+          "Add them again with /sec add if you need them back.",
+        "warning",
+      );
       return;
 
     case "on":

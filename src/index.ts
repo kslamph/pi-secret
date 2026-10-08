@@ -73,10 +73,27 @@ function ownsBash(pi: ExtensionAPI): boolean {
 }
 
 export default function piSecure(pi: ExtensionAPI): void {
+  /**
+   * DEFAULT TRUE, which inverts the original design.
+   *
+   * It shipped as opt-in because masking a credential file's contents was assumed to
+   * break the edit round-trip: the model reads `~/.aws/credentials`, gets masked shapes,
+   * and can no longer write the file back faithfully. That reasoning was right about the
+   * cost and wrong about its size, because of something the original analysis missed:
+   * shape masking already applied to EVERY other source of file content. Only
+   * `read`/`grep`/`find`/`ls` were excluded, and `cat ~/.aws/credentials` through bash
+   * was masked all along. So the flag was closing one side door while leaving the front
+   * one open by default — and spec §13.3 called that front door the largest hole in the
+   * design.
+   *
+   * Turning it OFF is still meaningful and is now the escape hatch rather than the
+   * default: a user who needs to round-trip a credential-bearing file through
+   * read → edit can turn it off and accept that the raw contents reach the endpoint.
+   */
   pi.registerFlag("sec-file-reads", {
-    description: "Also mask credential shapes in read/grep output (may break edit round-trips)",
+    description: "Mask credential shapes in read/grep/find/ls output (default on; turn off only to round-trip a credential file through edit)",
     type: "boolean",
-    default: false,
+    default: true,
   });
 
   pi.on("session_start", async (_event, ctx) => {

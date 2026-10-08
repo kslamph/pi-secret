@@ -32,7 +32,7 @@ One command, `/sec`, with eight subcommands:
 | `/sec rename OLD NEW` | Rename an entry. |
 | `/sec test NAME` | Reprint a secret's length + fingerprint so you can confirm a capture without echoing it. |
 | `/sec restore NAME` | Copy a captured value back to your clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
-| `/sec off` | Suspend ref injection and capture for this session. A bash command containing `{{sec:…}}` is **refused** with a reason (it is not run with a literal placeholder, which would look like a working credential). Output scrubbing deliberately stays on — extra masking can only cost context, un-masking would leak. |
+| `/sec off` | Suspend ref injection and capture for this session, and **clear this session's values**. A bash command containing `{{sec:…}}` is **refused** with a reason (it is not run with a literal placeholder, which would look like a working credential). Output scrubbing deliberately stays on — masking is a filter, not a capability: extra masking can only cost context, un-masking would leak. `/sec on` re-enables the mechanism but does **not** restore the values; re-add them with `/sec add`. |
 | `/sec on` | Re-enable pi-secure after `/sec off`. |
 
 Pasting a credential into the conversation also works: high-confidence secrets are captured into the vault and rewritten to a ref before anything is persisted, with a receipt line left in the transcript (name, length, fingerprint — never the value).
@@ -65,10 +65,12 @@ command that would write a ref to a file warns **you** — never the model — w
 
 Known gaps, in rough order of how much they should worry you:
 
-1. **`read`/`grep` on a credential file sends raw secrets to the endpoint** by default. This is the
-   largest accepted hole — it trades file round-trip fidelity for logger protection. Flip
-   `--sec-file-reads` to mask shapes in file reads too, at the cost of being unable to `edit` a
-   credential-bearing file.
+1. **`read`/`grep` on a credential file re-opens the hole** if you turn the flag off. Masking is
+   now the **default** (it used to be opt-in, which left this as the design's largest hole: the flag
+   only ever affected `read`/`grep`/`find`/`ls`, while `cat` of the same file through `bash` was
+   always masked, so the old default closed one side door and left the front one open). Pass
+   `--sec-file-reads=false` only when you need to round-trip a credential-bearing file through
+   `read` → `edit`; the cost is that the raw contents reach your endpoint.
 2. **Transformed secrets escape masking.** `base64`, `cut`, `rev`, hashing — shape matching is
    hygiene, not a boundary. A *truncated* encoding is now masked (Task 16, window match on the
    head/tail of each derived encoding); only a run cut mid-wrap degrades to masked-up-to-the-wrap,

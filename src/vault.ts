@@ -188,6 +188,14 @@ export function activeVault(): Vault {
   return vaultForSession(currentScope);
 }
 
+/**
+ * Drop the ACTIVE scope's values. `/sec off` uses it: the switch is only honest if the
+ * values really go away, and a vault left in memory is a capability still on the table.
+ */
+export function dropActiveVault(): void {
+  if (currentScope !== undefined) dropSessionVault(currentScope);
+}
+
 /** Wipe before deleting so a later registry dump cannot resurrect it. */
 export function dropSessionVault(scopeKey: string): void {
   REGISTRY.get(scopeKey)?.clear();

@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSecure from "../src/index.ts";
-import { setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
+import { activeScopeKey, setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
 import { runSecCommand } from "../src/commands.ts";
 import { Vault } from "../src/vault.ts";
+import { scrubToolResult } from "../src/glue.ts";
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
 
@@ -499,5 +500,117 @@ describe("the editor surface", () => {
     piSecure(h.pi);
     const brokenUi = { ...ctx, ui: {} as never, hasUI: false };
     await expect(h.fire("session_start", { reason: "startup" }, brokenUi)).resolves.not.toThrow();
+  });
+});
+
+/**
+ * A1 (2026-08): `--sec-file-reads` shipped default-OFF, which left the design's largest
+ * documented hole open by default. The flag only ever affected read/grep/find/ls —
+ * shape masking already applied to every other source of file content, so `cat
+ * ~/.aws/credentials` through bash was masked all along. The default is now inverted and
+ * the flag is the escape hatch.
+ */
+function defaultFlagHarness(value: boolean): { getFlag: () => boolean } {
+  return { getFlag: () => value };
+}
+
+describe("the file-read masking default", () => {
+  it("registers the flag as default-true", () => {
+    const h = harness();
+    piSecure(h.pi);
+    const flag = (h.pi.registerFlag as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
+      (c) => c[0] === "sec-file-reads",
+    );
+    expect(flag).toBeDefined();
+    // registerFlag(name, options) — the options object is the SECOND argument.
+    expect(flag![1]).toMatchObject({ type: "boolean", default: true });
+  });
+
+  it("masks credential shapes in a read result by default", () => {
+    const { getFlag } = defaultFlagHarness(true);
+    const out = scrubToolResult(
+      { toolName: "read", content: [{ type: "text", text: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" }] },
+      new Vault("t"),
+      { fileReads: getFlag() },
+    );
+    expect(JSON.stringify(out.content)).not.toContain("wJalrXUtnFEMI");
+    expect(out.hits).toBeGreaterThan(0);
+  });
+
+  it("still masks bash output when the flag is off — the knob is only about file reads", () => {
+    // If turning the flag off re-opened bash, the escape hatch would be far wider than
+    // its description and the default flip would have bought nothing.
+    const vault = new Vault("t");
+    const on = scrubToolResult(
+      { toolName: "bash", content: [{ type: "text", text: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" }] },
+      vault,
+      { fileReads: true },
+    );
+    const off = scrubToolResult(
+      { toolName: "bash", content: [{ type: "text", text: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" }] },
+      vault,
+      { fileReads: false },
+    );
+    expect(on.hits).toBeGreaterThan(0);
+    expect(off.hits).toBe(on.hits);
+  });
+
+  it("off really does re-open read results, which is the documented cost", () => {
+    const raw = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const off = scrubToolResult({ toolName: "read", content: [{ type: "text", text: raw }] }, new Vault("t"), {
+      fileReads: false,
+    });
+    expect(off.hits).toBe(0);
+    expect(JSON.stringify(off.content)).toContain("wJalrXUtnFEMI");
+  });
+});
+
+/**
+ * B1 (2026-08): `/sec off` was a half-switch — injection and capture stopped, but the
+ * VAULT stayed populated and output scrubbing stayed on. The last one is right and
+ * deliberate (masking is a filter, not a capability: extra masking can only cost context,
+ * while un-masking would leak). Keeping the vault was harder to justify: with the values
+ * still in memory, anything that can reach the injection path can still spend them, and
+ * "I turned pi-secure off" should mean no capability is handed out at all.
+ */
+describe("/sec off is a real off", () => {
+  it("empties the vault, so a ref cannot be expanded afterwards", async () => {
+    // The REGISTRY instance, not a standalone Vault: `new Vault(scope)` is a separate
+    // object, so seeding one and asserting on vaultForSession(scope) would pass no matter
+    // what /sec off did. The first draft of this test had exactly that bug.
+    setActiveScopeKey("off-scope");
+    const vault = vaultForSession("off-scope");
+    vault.add("gh_pat", GH, "prompt");
+    expect(vault.resolve("gh_pat")).toBe(GH);
+    const notify = vi.fn();
+    await runSecCommand("off", vault, { ui: { notify } } as never);
+    expect(activeScopeKey()).toBe("off-scope"); // scope survives; the VALUES do not
+    expect(vaultForSession("off-scope").resolve("gh_pat")).toBeUndefined();
+    expect(vaultForSession("off-scope").names()).toEqual([]);
+    setActiveScopeKey(undefined);
+  });
+
+  it("keeps the values recoverable via /sec on", async () => {
+    // The point of dropping is that the user is done with them. Silently restoring them
+    // on /sec on would make the switch meaningless, so `on` must NOT bring them back —
+    // it only re-enables the mechanism. This test pins that they stay gone.
+    setActiveScopeKey("off-scope-2");
+    const vault = vaultForSession("off-scope-2");
+    vault.add("gh_pat", GH, "prompt");
+    expect(vault.resolve("gh_pat")).toBe(GH);
+    const notify = vi.fn();
+    await runSecCommand("off", vault, { ui: { notify } } as never);
+    await runSecCommand("on", vault, { ui: { notify } } as never);
+    expect(vaultForSession("off-scope-2").resolve("gh_pat")).toBeUndefined();
+    setActiveScopeKey(undefined);
+  });
+
+  it("says what it actually stopped, so the message matches the behaviour", async () => {
+    const notify = vi.fn();
+    setActiveScopeKey("off-scope-3");
+    await runSecCommand("off", vaultForSession("off-scope-3"), { ui: { notify } } as never);
+    const [message] = notify.mock.calls.at(-1)! as [string];
+    expect(message).toMatch(/cleared/i);
+    setActiveScopeKey(undefined);
   });
 });
