@@ -64,6 +64,13 @@ function fileReadsEnabled(pi: ExtensionAPI): boolean {
  * literal `{{sec:…}}` text with no error from pi at all. That is worth saying out
  * loud, once per session, but never at the cost of failing session start.
  */
+/**
+ * Tracks whether pi's provider-level payload hook actually ran. See the `turn_end`
+ * handler for why this is measured rather than assumed.
+ */
+let providerHookFired = false;
+let providerHookWarned = false;
+
 function ownsBash(pi: ExtensionAPI): boolean {
   try {
     return bashIsOwnedByPiSecure(pi);
@@ -97,6 +104,10 @@ export default function piSecure(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    // A reload rebuilds the extension but not the process, so these two must not be
+    // sticky across sessions or the warning would never fire for a later session.
+    providerHookFired = false;
+    providerHookWarned = false;
     setActiveScopeKey(sessionScope(ctx));
     registerSecureBash(pi, ctx.cwd, { vault: () => vault(ctx) });
     pi.registerTool(createSecListTool(() => vault(ctx)));
@@ -218,12 +229,33 @@ export default function piSecure(pi: ExtensionAPI): void {
   });
 
   pi.on("before_provider_request", (event, ctx) => {
+    // Recorded BEFORE the enabled check on purpose: this measures whether the HOST
+    // provides the hook, which is a property of the provider, not of our switch. A
+    // deliberate `/sec off` must not read as a provider defect — and that case is
+    // suppressed separately in turn_end.
+    providerHookFired = true;
     if (!isEnabled()) return undefined;
-    // Last mile: the bytes actually leaving the machine.
+    // Last mile: the bytes actually leaving the machine. Note the layering, because it is
+    // not uniform: `context` fires on EVERY provider request, while this hook only exists
+    // where the provider's own api invokes onPayload (all of pi-ai 0.85.1's do; the faux
+    // provider does not, which is why the canary harness has to inject the callback
+    // itself). The durable guarantee is context + message_end + tool_result; this is a
+    // provider-dependent extra layer, and `turn_end` below measures whether it exists.
     const out = scrubDeepFailClosed(event.payload as unknown, vault(ctx), { shapes: true }, (cls) =>
       ctx.ui.notify(`pi-secure: provider payload scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? (out.value as never) : undefined;
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    if (providerHookFired || providerHookWarned || !isEnabled()) return;
+    providerHookWarned = true;
+    ctx.ui.notify(
+      "pi-secure: this provider never invoked the payload hook, so the provider-level net is absent. " +
+        "The transcript, tool results and model context are still scrubbed — only the final " +
+        "provider-specific request body is not double-checked.",
+      "warning",
+    );
   });
 
   pi.registerEntryRenderer(RECEIPT_TYPE, (entry, _options, theme) =>

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSecure from "../src/index.ts";
 import { activeScopeKey, setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
+import { setEnabled } from "../src/state.ts";
 import { runSecCommand } from "../src/commands.ts";
 import { Vault } from "../src/vault.ts";
 import { scrubToolResult } from "../src/glue.ts";
@@ -612,5 +613,51 @@ describe("/sec off is a real off", () => {
     const [message] = notify.mock.calls.at(-1)! as [string];
     expect(message).toMatch(/cleared/i);
     setActiveScopeKey(undefined);
+  });
+});
+
+/**
+ * A2 (2026-08): the design calls `before_provider_request` its last mile, but it is a
+ * PROVIDER-level hook — pi-ai invokes it from inside each provider's api implementation.
+ * Every provider shipped with 0.85.1 does; the faux provider does not, and a future one
+ * might forget. When it is absent the failure is silent: the turn looks completely normal
+ * and one layer of defence is simply not running.
+ *
+ * So the extension now measures it. If a turn completes and the hook never fired, the user
+ * is told once, with the accurate scope of what still applies.
+ */
+describe("the provider-level net is measured, not assumed", () => {
+  // Earlier describes in this file run `/sec off`, which is process-global state.
+  beforeEach(() => {
+    setEnabled(true);
+  });
+
+  const notify = () => vi.fn();
+
+  it("says nothing while the hook is firing", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    const n = notify();
+    const uiCtx = { ...ctx, ui: { ...ctx.ui, notify: n } };
+    await h.fire("session_start", { reason: "startup" }, uiCtx);
+    await h.fire("before_provider_request", { payload: { messages: [] }, model: {}, options: {} }, uiCtx);
+    await h.fire("turn_end", { turn: 1 }, uiCtx);
+    expect(n.mock.calls.filter((c) => String(c[0]).includes("provider"))).toHaveLength(0);
+  });
+
+  it("warns exactly once when a turn completes and the hook never fired", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    const n = notify();
+    const uiCtx = { ...ctx, ui: { ...ctx.ui, notify: n } };
+    await h.fire("session_start", { reason: "startup" }, uiCtx);
+    await h.fire("turn_end", { turn: 1 }, uiCtx);
+    await h.fire("turn_end", { turn: 2 }, uiCtx);
+    await h.fire("turn_end", { turn: 3 }, uiCtx);
+    const warnings = n.mock.calls.filter((c) => String(c[0]).includes("provider"));
+    expect(warnings).toHaveLength(1);
+    // The message must say what STILL applies, or it reads as "pi-secure is broken".
+    expect(String(warnings[0]![0])).toMatch(/context|message_end|tool_result/i);
+    expect(String(warnings[0]![0])).not.toContain("disabled");
   });
 });

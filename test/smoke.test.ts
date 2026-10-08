@@ -55,6 +55,9 @@ describe("extension entry", () => {
     // session_compact is in this list because a compaction summary is the only
     // model-authored text pi persists WITHOUT passing it through message_end — see
     // src/index.ts. A refactor that dropped it would put summaries back on disk raw.
+    //
+    // turn_end is here for a different reason: it is where pi-secure measures whether the
+    // provider-level payload hook exists at all, and drops that measurement if removed.
     const { api, calls } = stubPi();
     piSecure(api);
     expect(hookNames(calls).sort()).toEqual(
@@ -68,6 +71,7 @@ describe("extension entry", () => {
         "session_start",
         "tool_call",
         "tool_result",
+        "turn_end",
       ].sort(),
     );
     expect(calls.map((c) => c.method)).toContain("registerFlag");
