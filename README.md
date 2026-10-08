@@ -32,7 +32,7 @@ One command, `/sec`, with eight subcommands:
 | `/sec rename OLD NEW` | Rename an entry. |
 | `/sec test NAME` | Reprint a secret's length + fingerprint so you can confirm a capture without echoing it. |
 | `/sec restore NAME` | Copy a captured value back to your clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
-| `/sec off` | Suspend pi-secure for this session. |
+| `/sec off` | Suspend ref injection and capture for this session. A bash command containing `{{sec:…}}` is **refused** with a reason (it is not run with a literal placeholder, which would look like a working credential). Output scrubbing deliberately stays on — extra masking can only cost context, un-masking would leak. |
 | `/sec on` | Re-enable pi-secure after `/sec off`. |
 
 Pasting a credential into the conversation also works: high-confidence secrets are captured into the vault and rewritten to a ref before anything is persisted, with a receipt line left in the transcript (name, length, fingerprint — never the value).
