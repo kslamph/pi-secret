@@ -1,12 +1,32 @@
 {
-  "name": "pi-secure",
-  "version": "0.0.1",
-  "description": "Keep credentials out of LLM context while letting the model use them via {{sec:NAME}} refs",
+  "name": "pi-secret",
+  "version": "0.1.0",
+  "description": "Keep API keys, tokens and passwords out of the model's context: the agent uses {{sec:NAME}} refs, the value is expanded only for the command that needs it.",
   "type": "module",
   "license": "MIT",
-  "keywords": ["pi-package", "pi", "pi-extension", "secrets", "security"],
-  "files": ["src", "README.md", "LICENSE"],
-  "pi": { "extensions": ["./src/index.ts"] },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "secrets",
+    "credentials",
+    "api-keys",
+    "tokens",
+    "redaction",
+    "masked-input",
+    "env",
+    "security"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,5 +47,12 @@
     "typebox": "1.3.7",
     "typescript": "5.9.3",
     "vitest": "4.1.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kslamph/pi-secret.git"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

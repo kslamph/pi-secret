@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
-import { bashIsOwnedByPiSecure, createSecureBashToolDefinition } from "../src/tools/bash.ts";
+import { bashIsOwnedByPiSecret, createSecureBashToolDefinition } from "../src/tools/bash.ts";
 import { Vault } from "../src/vault.ts";
 import { setEnabled } from "../src/state.ts";
 
@@ -60,7 +60,7 @@ describe("secure bash tool definition", () => {
   it("reports whether our bash definition actually won registration", () => {
     // The real registry always carries a RESOLVED file path (measured against pi 0.85.1:
     // sourceInfo is {path, source, scope, origin} and usually no baseDir at all). The old
-    // version of this test used the bare string "pi-secure", which only the substring check
+    // version of this test used the bare string "pi-secret", which only the substring check
     // ever matched — a shape pi never produces.
     const owned = [
       {
@@ -87,9 +87,9 @@ describe("secure bash tool definition", () => {
       },
     ];
     const fakePi = (tools: unknown[]) => ({ getAllTools: () => tools }) as never;
-    expect(bashIsOwnedByPiSecure(fakePi(owned))).toBe(true);
-    expect(bashIsOwnedByPiSecure(fakePi(lost))).toBe(false);
-    expect(bashIsOwnedByPiSecure(fakePi([]))).toBe(false);
+    expect(bashIsOwnedByPiSecret(fakePi(owned))).toBe(true);
+    expect(bashIsOwnedByPiSecret(fakePi(lost))).toBe(false);
+    expect(bashIsOwnedByPiSecret(fakePi([]))).toBe(false);
   });
 
   it("reports not-owned when a rival extension won the bash race", () => {
@@ -108,7 +108,7 @@ describe("secure bash tool definition", () => {
       },
     ];
     const fakePi = (tools: unknown[]) => ({ getAllTools: () => tools }) as never;
-    expect(bashIsOwnedByPiSecure(fakePi(rival))).toBe(false);
+    expect(bashIsOwnedByPiSecret(fakePi(rival))).toBe(false);
   });
 
   it("throws instead of exec'ing an unresolvable ref", async () => {
@@ -166,7 +166,7 @@ describe("secure bash tool definition", () => {
 describe("/sec off must actually stop bash ref injection", () => {
   afterEach(() => setEnabled(true));
 
-  it("blocks a ref in bash while pi-secure is disabled", async () => {
+  it("blocks a ref in bash while pi-secret is disabled", async () => {
     setEnabled(false);
     const vault = new Vault("t");
     vault.add("gh_pat", GH, "prompt");
@@ -205,11 +205,11 @@ describe("/sec off must actually stop bash ref injection", () => {
 });
 
 /**
- * Review 2026-10-08: the ownership probe matched the substring "pi-secure" anywhere in
+ * Review 2026-10-08: the ownership probe matched the substring "pi-secret" anywhere in
  * the extension's path, which cuts both ways. FALSE NEGATIVE: a legitimate install
  * under a path without that substring (a packaged cache, a monorepo checkout) reports
  * "not ours" and nags every session. FALSE POSITIVE — the dangerous direction, because
- * it suppresses the warning: anyone with a checkout at `…/pi-secure-fork/`, or any
+ * it suppresses the warning: anyone with a checkout at `…/pi-secret-fork/`, or any
  * extension deliberately named to contain the substring, silences the detector whose
  * entire job is "did another extension take `bash` from us".
  *
@@ -228,7 +228,7 @@ describe("bash ownership is decided by real path identity, not a substring", () 
   const fakePi = (tools: unknown[]) => ({ getAllTools: () => tools }) as never;
 
   it("accepts our own real package directory", () => {
-    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${ourDir}/index.ts`, baseDir: ourDir })]))).toBe(true);
+    expect(bashIsOwnedByPiSecret(fakePi([tool({ path: `${ourDir}/index.ts`, baseDir: ourDir })]))).toBe(true);
   });
 
   it("accepts a SYMLINKED install, which is how `pi install <path>` wires it up", () => {
@@ -238,18 +238,18 @@ describe("bash ownership is decided by real path identity, not a substring", () 
     // checkout, while pi reports whatever path it loaded the extension FROM — the symlink
     // pi created under the agent dir. Comparing directories therefore mismatched on every
     // symlinked install, and the user was told their refs would not expand while they were
-    // expanding perfectly well. The earlier fallback (matching /pi-secure/ in the path) only
-    // masked it when the link happened to be named pi-secure.
+    // expanding perfectly well. The earlier fallback (matching /pi-secret/ in the path) only
+    // masked it when the link happened to be named pi-secret.
     //
     // pi's synthetic sourceInfo also frequently has NO baseDir at all (measured: path,
     // source, scope, origin only), which is what forced that fallback in the first place.
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-link-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-link-"));
     const link = join(dir, "installed-name-without-the-word-secure");
     symlinkSync(join(ourDir, "index.ts"), link);
     try {
       expect(realpathSync(link)).toBe(realpathSync(ourEntry));
-      expect(bashIsOwnedByPiSecure(fakePi([tool({ path: link, baseDir: undefined })]))).toBe(true);
-      expect(bashIsOwnedByPiSecure(fakePi([tool({ path: link, baseDir: dir })]))).toBe(true);
+      expect(bashIsOwnedByPiSecret(fakePi([tool({ path: link, baseDir: undefined })]))).toBe(true);
+      expect(bashIsOwnedByPiSecret(fakePi([tool({ path: link, baseDir: dir })]))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -257,27 +257,27 @@ describe("bash ownership is decided by real path identity, not a substring", () 
 
   it("still reports a lost race against a real rival path", () => {
     // The flip side: precision must not become permissiveness.
-    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: "/home/someone/other-ext/index.ts", baseDir: undefined })]))).toBe(
+    expect(bashIsOwnedByPiSecret(fakePi([tool({ path: "/home/someone/other-ext/index.ts", baseDir: undefined })]))).toBe(
       false,
     );
   });
 
-  it("rejects a rival checkout whose path merely CONTAINS pi-secure", () => {
-    const fork = "/home/someone/experiments/pi-secure-fork/src";
-    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${fork}/index.ts`, baseDir: fork })]))).toBe(false);
+  it("rejects a rival checkout whose path merely CONTAINS pi-secret", () => {
+    const fork = "/home/someone/experiments/pi-secret-fork/src";
+    expect(bashIsOwnedByPiSecret(fakePi([tool({ path: `${fork}/index.ts`, baseDir: fork })]))).toBe(false);
   });
 
   it("accepts a renamed install, because our own path moved with it", () => {
     const renamed = "/opt/extension-cache/a1b2c3/src";
     // Simulates the same layout at a different location: pi reports that baseDir for
     // our extension, and this module's own URL is inside it, so they agree.
-    expect(bashIsOwnedByPiSecure(fakePi([tool({ path: `${renamed}/index.ts`, baseDir: renamed })]))).toBe(
+    expect(bashIsOwnedByPiSecret(fakePi([tool({ path: `${renamed}/index.ts`, baseDir: renamed })]))).toBe(
       renamed === ourDir,
     );
   });
 
   it("still reports not-ours for the builtin and for an empty registry", () => {
-    expect(bashIsOwnedByPiSecure(fakePi([tool({ source: "builtin", path: "<builtin:bash>" })]))).toBe(false);
-    expect(bashIsOwnedByPiSecure(fakePi([]))).toBe(false);
+    expect(bashIsOwnedByPiSecret(fakePi([tool({ source: "builtin", path: "<builtin:bash>" })]))).toBe(false);
+    expect(bashIsOwnedByPiSecret(fakePi([]))).toBe(false);
   });
 });

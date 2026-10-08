@@ -117,7 +117,7 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
       blocked: {
         reason: BLOCKED_IN_CONTENT.has(toolName)
           ? `${FILE_WRITE_REASON} A vaulted value (sec:${literals.join(", ")}) was also passed literally.`
-          : `sec:${literals.join(", ")} was passed as a literal value. Reference it as {{sec:${literals[0]}}} instead — pi-secure substitutes it at execution time, so the value never enters the command, the transcript, or the session file.`,
+          : `sec:${literals.join(", ")} was passed as a literal value. Reference it as {{sec:${literals[0]}}} instead — pi-secret substitutes it at execution time, so the value never enters the command, the transcript, or the session file.`,
       },
       expanded: [],
       env: {},

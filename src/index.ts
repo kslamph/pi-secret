@@ -8,7 +8,7 @@ import {
   scrubOutputSnapshot,
   scrubToolResult,
 } from "./glue.ts";
-import { bashIsOwnedByPiSecure, registerSecureBash } from "./tools/bash.ts";
+import { bashIsOwnedByPiSecret, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
 import { bashRedirectWarning } from "./redirect.ts";
 import { createSecAutocompleteProvider } from "./autocomplete.ts";
@@ -16,7 +16,7 @@ import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } f
 import { isEnabled } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
-export const VERSION = "0.0.1";
+export const VERSION = "0.1.0";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes
@@ -73,13 +73,13 @@ let providerHookWarned = false;
 
 function ownsBash(pi: ExtensionAPI): boolean {
   try {
-    return bashIsOwnedByPiSecure(pi);
+    return bashIsOwnedByPiSecret(pi);
   } catch {
     return true;
   }
 }
 
-export default function piSecure(pi: ExtensionAPI): void {
+export default function piSecret(pi: ExtensionAPI): void {
   /**
    * DEFAULT TRUE, which inverts the original design.
    *
@@ -133,16 +133,16 @@ export default function piSecure(pi: ExtensionAPI): void {
       // on mid-startup anyway.
       try {
         ctx.ui.notify(
-          "pi-secure: another extension owns `bash`, so {{sec:…}} refs will NOT expand. " +
+          "pi-secret: another extension owns `bash`, so {{sec:…}} refs will NOT expand. " +
             "Extension load order decides this — first registration of a tool name wins — " +
-            "so load pi-secure before the other extension, or disable it.",
+            "so load pi-secret before the other extension, or disable it.",
           "error",
         );
       } catch {
         /* no UI to tell; the failure mode is visible anyway the moment a ref is used */
       }
     }
-    if (ctx.hasUI) ctx.ui.setStatus("pi-secure", `sec: ${vault(ctx).size()} active`);
+    if (ctx.hasUI) ctx.ui.setStatus("pi-secret", `sec: ${vault(ctx).size()} active`);
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -150,7 +150,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     // reload keeps the vault (the module is re-evaluated but the registry is not);
     // every other reason is a different session and must not inherit these values.
     if (reason && reason !== "reload") dropSessionVault(sessionScope(ctx));
-    if (ctx.hasUI) ctx.ui.setStatus("pi-secure", undefined);
+    if (ctx.hasUI) ctx.ui.setStatus("pi-secret", undefined);
   });
 
   pi.on("input", async (event, ctx) => {
@@ -164,7 +164,7 @@ export default function piSecure(pi: ExtensionAPI): void {
         .join("\n"),
       "info",
     );
-    if (ctx.hasUI) ctx.ui.setStatus("pi-secure", `sec: ${vault(ctx).size()} active`);
+    if (ctx.hasUI) ctx.ui.setStatus("pi-secret", `sec: ${vault(ctx).size()} active`);
     // The value is already in the vault and the text now carries only the ref, so
     // this transform runs BEFORE persistence — nothing sensitive reaches the file.
     return { action: "transform" as const, text: out.text };
@@ -202,7 +202,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     scrubOutputSnapshot(out.details ?? event.details, v);
     if (out.hits && ctx.hasUI) {
       // Never interpolate event.input here: it carries EXPANDED args with real values.
-      ctx.ui.notify(`pi-secure masked ${out.hits} secret occurrence(s) in ${event.toolName} output`, "info");
+      ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in ${event.toolName} output`, "info");
     }
     // Returned unconditionally, including when hits === 0: this hook is the primary
     // guarantee (it runs before the result message is built and persisted), so the
@@ -213,7 +213,7 @@ export default function piSecure(pi: ExtensionAPI): void {
   pi.on("context", async (event, ctx) => {
     if (!isEnabled()) return undefined;
     const out = scrubDeepFailClosed(event.messages as unknown, vault(ctx), { shapes: true }, (cls) =>
-      ctx.ui.notify(`pi-secure: context scrub failed closed (${cls})`, "error"),
+      ctx.ui.notify(`pi-secret: context scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? { messages: out.value as never } : undefined;
   });
@@ -237,7 +237,7 @@ export default function piSecure(pi: ExtensionAPI): void {
   pi.on("message_end", (event, ctx) => {
     if (!isEnabled()) return undefined;
     const out = scrubDeepFailClosed(event.message as unknown, vault(ctx), { shapes: true }, (cls) =>
-      ctx.ui.notify(`pi-secure: message scrub failed closed (${cls})`, "error"),
+      ctx.ui.notify(`pi-secret: message scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? { message: out.value as never } : undefined;
   });
@@ -256,7 +256,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     // itself). The durable guarantee is context + message_end + tool_result; this is a
     // provider-dependent extra layer, and `turn_end` below measures whether it exists.
     const out = scrubDeepFailClosed(event.payload as unknown, vault(ctx), { shapes: true }, (cls) =>
-      ctx.ui.notify(`pi-secure: provider payload scrub failed closed (${cls})`, "error"),
+      ctx.ui.notify(`pi-secret: provider payload scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? (out.value as never) : undefined;
   });
@@ -265,7 +265,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     if (providerHookFired || providerHookWarned || !isEnabled()) return;
     providerHookWarned = true;
     ctx.ui.notify(
-      "pi-secure: this provider never invoked the payload hook, so the provider-level net is absent. " +
+      "pi-secret: this provider never invoked the payload hook, so the provider-level net is absent. " +
         "The transcript, tool results and model context are still scrubbed — only the final " +
         "provider-specific request body is not double-checked.",
       "warning",
@@ -296,7 +296,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     if (!entry?.id) return;
     const out = scrubCompactionSummaryFile(file, entry.id, vault(ctx));
     if (out.rewritten && ctx.hasUI) {
-      ctx.ui.notify(`pi-secure masked ${out.hits} secret occurrence(s) in a compaction summary`, "info");
+      ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in a compaction summary`, "info");
     }
   });
 

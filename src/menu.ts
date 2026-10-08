@@ -23,6 +23,7 @@ import type { PublicEntry } from "./vault.ts";
 export type SecAction =
   | { kind: "entry"; name: string }
   | { kind: "add" }
+  | { kind: "add-file" }
   | { kind: "toggle" }
   | { kind: "copy"; name: string }
   | { kind: "rename"; name: string }
@@ -95,13 +96,20 @@ export function secretRows(
     separatorBefore: true,
   });
   rows.push({
+    action: { kind: "add-file" },
+    // Named after what it reads, not after the mechanism: the user has a FILE with keys in it,
+    // and "import" would invite the question of what else it imports.
+    label: "Add from a file…",
+    detail: "f",
+  });
+  rows.push({
     action: { kind: "toggle" },
     // The row names the SUBJECT as well as the action. A row reading "Enable for this
     // session" inside a list of per-secret items was read as being about those items — it is
-    // about pi-secure itself, and the consequence differs per direction, so both are stated.
+    // about pi-secret itself, and the consequence differs per direction, so both are stated.
     label: options.enabled
-      ? "Turn pi-secure off (clears these secrets)"
-      : "Turn pi-secure on",
+      ? "Turn pi-secret off (clears these secrets)"
+      : "Turn pi-secret on",
     detail: "t",
   });
   return rows;
@@ -145,7 +153,7 @@ export function selectList(
         // makes the list scannable — the one thing this menu exists for. The full name is
         // still shown in the sub-menu title and in `/sec list`.
         // Only ENTRY rows share the name column. An action row is not a name, and truncating
-        // "Turn pi-secure off (clears these secrets)" to "Turn pi-secure off (cle…" loses the
+        // "Turn pi-secret off (clears these secrets)" to "Turn pi-secret off (cle…" loses the
         // part that says what will happen.
         const column = Math.min(24, Math.max(8, ...rows.filter(isEntryRow).map((r) => r.label.length)));
         const lines: string[] = [];

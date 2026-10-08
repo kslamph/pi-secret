@@ -66,7 +66,7 @@ export function createSecureBashToolDefinition(cwd: string, options: SecureBashO
       // false-confidence class this design treats as its worst failure.
       if (!isEnabled() && /\{\{sec:[a-z][a-z0-9_-]{0,63}\}\}/.test(spawnCtx.command)) {
         throw new Error(
-          "pi-secure is disabled for this session, so {{sec:…}} refs are not expanded. Run /sec on to re-enable them.",
+          "pi-secret is disabled for this session, so {{sec:…}} refs are not expanded. Run /sec on to re-enable them.",
         );
       }
       const expansion = injectBashCommand(spawnCtx.command, options.vault());
@@ -94,7 +94,7 @@ export function createSecureBashToolDefinition(cwd: string, options: SecureBashO
  * while pi reports whatever path it loaded the extension FROM. Under `pi install <path>`
  * those differ: pi creates a link under the agent dir, Node resolves through it, and the two
  * strings never match. An earlier version compared directories and fell back to matching
- * /pi-secure/ in the path when `baseDir` was absent — which is most of the time, since pi's
+ * /pi-secret/ in the path when `baseDir` was absent — which is most of the time, since pi's
  * synthetic sourceInfo for a file-loaded extension carries path/source/scope/origin and no
  * baseDir. The result was a warning on every symlinked install telling the user their refs
  * would not expand while they were expanding perfectly well. A field report, not a theory.
@@ -127,7 +127,7 @@ function resolveRealPath(p: string): string {
  * `source: "extension"` (or `"cli"`, or a scope name) too, which is why identity is decided
  * by comparing paths rather than by reading a source label.
  */
-export function bashIsOwnedByPiSecure(pi: ExtensionAPI): boolean {
+export function bashIsOwnedByPiSecret(pi: ExtensionAPI): boolean {
   const effective = pi.getAllTools().find((t) => t.name === "bash");
   // No bash at all, or still the builtin: we did not register, or registration did not take.
   if (!effective || effective.sourceInfo.source === "builtin") return false;

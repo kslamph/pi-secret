@@ -50,7 +50,7 @@ function nextWord(text: string, from: number): string | undefined {
  * redirect, so `[[ $a > $b ]]` is reported as writing to a file named after `$b`.
  * Deliberately not handled. A spurious warning is user-visible noise, never a security
  * hole, and teaching the scanner about `[[ ]]` is exactly the fragile-detector work this
- * design has twice declined — a detector that misfires reads as pi-secure being broken.
+ * design has twice declined — a detector that misfires reads as pi-secret being broken.
  *
  * Files this command would write through an output redirect or `tee`.
  *
@@ -112,7 +112,7 @@ export function bashRedirectWarning(command: string): RedirectWarning | undefine
   return {
     targets,
     message:
-      `pi-secure: this command writes a secret REFERENCE (not the value) to ${targets.join(", ")}. ` +
+      `pi-secret: this command writes a secret REFERENCE (not the value) to ${targets.join(", ")}. ` +
       `That file will contain the literal {{sec:…}} text, which will not work there. ` +
       `Materialising secrets into files is out of scope — if you need the value in that file, ` +
       `run the command yourself.`,

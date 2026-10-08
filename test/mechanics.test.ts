@@ -20,7 +20,7 @@ import { setActiveScopeKey, vaultForSession } from "../src/vault.ts";
  * test names so a failure points at the line to re-check.
  *
  * When a row here fails, the correct response is to re-verify the claim and then either fix
- * pi-secure or amend spec §3 — never to relax the assertion.
+ * pi-secret or amend spec §3 — never to relax the assertion.
  */
 
 const CANARY = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -64,7 +64,7 @@ describe("spec §3 row: the context hook fires on every provider request", () =>
 describe("spec §3 row: before_provider_request is provider-level, not agent-level", () => {
   it("the faux provider does NOT invoke options.onPayload; every shipped provider api does", async () => {
     // spec §3 does not say this, and getting it wrong is expensive: it means the hook
-    // pi-secure calls its "last mile" is absent for any provider that does not wire
+    // pi-secret calls its "last mile" is absent for any provider that does not wire
     // onPayload, and absent entirely under the faux provider the test suite drives.
     const cwd = sessionDir();
     const payloadCount = { withShim: 0, withoutShim: 0 };
@@ -95,7 +95,7 @@ describe("spec §3 row: before_provider_request is provider-level, not agent-lev
   it("every selectable provider api in pi-ai calls onPayload", async () => {
     // The audit behind that claim: provider apis under pi-ai/dist/api that are selectable
     // rather than shared helpers. A new provider that forgets onPayload would silently
-    // remove pi-secure's provider-level net, and this is the test that would notice.
+    // remove pi-secret's provider-level net, and this is the test that would notice.
     const { readdirSync, readFileSync: read } = await import("node:fs");
     const dir = new URL("../node_modules/@earendil-works/pi-ai/dist/api/", import.meta.url).pathname;
     const helpers = new Set([
@@ -148,7 +148,7 @@ describe("spec §3 row: a throwing extension handler is swallowed, not propagate
   it("message_end: the pre-handler message is what survives", async () => {
     // extensions/runner.js emitMessageEnd wraps EACH handler in try/catch, calls
     // emitError(), and continues with `currentMessage` unchanged. This is the assumption
-    // pi-secure's fail-closed scrubbing exists to defend: if the handler throws, an
+    // pi-secret's fail-closed scrubbing exists to defend: if the handler throws, an
     // UNscrubbed message is what gets persisted. If a future pi propagates handler errors
     // instead, this test fails and the wrappers can be re-evaluated rather than assumed
     // redundant.
@@ -178,7 +178,7 @@ describe("spec §3 row: a throwing extension handler is swallowed, not propagate
 describe("spec §3 row: among extensions, the first registration of a name wins", () => {
   it("a rival extension registering bash beats us, silently", async () => {
     // extensions/loader.js + runner.js: extension tools replace built-ins, but among
-    // extensions first registration wins. The failure pi-secure has to detect is invisible:
+    // extensions first registration wins. The failure pi-secret has to detect is invisible:
     // refs would reach the child as literal text and pi would report no error at all.
     const cwd = sessionDir();
     const rival = {
@@ -202,7 +202,7 @@ describe("spec §3 row: among extensions, the first registration of a name wins"
     await harness.session.prompt("hi");
     // An INLINE extension (a factory passed by the host) reports source "inline"; a
     // file-based one reports "extension". Either way the point is the same: the entry is
-    // NOT ours, which is exactly the state `bashIsOwnedByPiSecure` has to detect — and it
+    // NOT ours, which is exactly the state `bashIsOwnedByPiSecret` has to detect — and it
     // got there without any error from pi.
     const registry = harness.session.getAllTools().find((t) => t.name === "bash");
     expect(registry?.sourceInfo.source).not.toBe("builtin");
@@ -211,7 +211,7 @@ describe("spec §3 row: among extensions, the first registration of a name wins"
 });
 
 describe("spec §3 row: a compaction summary is persisted WITHOUT passing message_end", () => {
-  it("which is why pi-secure has to amend the file itself", async () => {
+  it("which is why pi-secret has to amend the file itself", async () => {
     // If this ever starts failing because pi routes summaries through message_end, the
     // file amendment in glue.ts becomes redundant — worth knowing rather than guessing.
     const cwd = sessionDir();

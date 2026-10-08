@@ -95,7 +95,7 @@ describe("applying a completion", () => {
   });
 });
 /**
- * Regression: loading pi-secure killed Tab completion everywhere.
+ * Regression: loading pi-secret killed Tab completion everywhere.
  *
  * `ctx.ui.addAutocompleteProvider(factory)` is a WRAPPER hook: pi calls
  * `factory(currentProvider)` and installs the result, where the chain starts at pi's

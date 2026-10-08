@@ -1,14 +1,14 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import piSecure, { VERSION } from "../src/index.ts";
+import piSecret, { VERSION } from "../src/index.ts";
 
 /**
  * A stub ExtensionAPI that records what the factory asks pi to do. Its purpose is
  * to make the factory's *registration surface* an assertion: a refactor that drops
  * a hook, the flag, a tool or the receipt renderer used to pass this file, because
- * `typeof piSecure === "function"` says nothing about what the factory does when
- * called. Nothing here is applied to a real session — pi-secure's effect on
+ * `typeof piSecret === "function"` says nothing about what the factory does when
+ * called. Nothing here is applied to a real session — pi-secret's effect on
  * credentials is covered by the canary gate, not by this unit.
  */
 function stubPi() {
@@ -33,8 +33,8 @@ const hookNames = (calls: { method: string; arg: unknown }[]): string[] =>
 
 describe("extension entry", () => {
   it("exports a zero-arg-style factory taking ExtensionAPI", () => {
-    expect(typeof piSecure).toBe("function");
-    expect(piSecure.length).toBe(1);
+    expect(typeof piSecret).toBe("function");
+    expect(piSecret.length).toBe(1);
   });
 
   it("reports its version", () => {
@@ -56,10 +56,10 @@ describe("extension entry", () => {
     // model-authored text pi persists WITHOUT passing it through message_end — see
     // src/index.ts. A refactor that dropped it would put summaries back on disk raw.
     //
-    // turn_end is here for a different reason: it is where pi-secure measures whether the
+    // turn_end is here for a different reason: it is where pi-secret measures whether the
     // provider-level payload hook exists at all, and drops that measurement if removed.
     const { api, calls } = stubPi();
-    piSecure(api);
+    piSecret(api);
     expect(hookNames(calls).sort()).toEqual(
       [
         "before_provider_request",
@@ -86,7 +86,7 @@ describe("extension entry", () => {
     // at factory time. Asserting that keeps it from being hoisted into the
     // factory, where `cwd` does not exist yet.
     const { api, calls } = stubPi();
-    piSecure(api);
+    piSecret(api);
     expect(calls.filter((c) => c.method === "registerTool")).toHaveLength(0);
   });
 });

@@ -221,6 +221,58 @@ function materialText(messages: unknown[]): string {
     .join("\n");
 }
 
+/**
+ * spec §12g — the file-import flow, under the sweep that does not care which path leaked.
+ *
+ * The import is a NEW ingest route, and a new route is exactly when a canary run earns its keep:
+ * the property worth pinning is not only "the value stays out" but "the import leaves no trace in
+ * the transcript at all" — no receipt carrying values, no entry recording the file.
+ */
+describe("/sec add-from-file under the canary sweep", () => {
+  it("puts the value in the vault and nothing whatsoever in the transcript", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    // The fixture is SUPPOSED to contain the canary, so it lives outside every swept root
+    // (the sweep enumerates `pi-secret-sessions-*`, `pi-secret-cwd-*` and `pi-bash*`).
+    const source = mkdtempSync(join(tmpdir(), "pi-secret-import-src-"));
+    const file = join(source, ".env");
+    writeFileSync(file, `IMPORTED_KEY=${CANARY}\nPORT=8080\n`);
+
+    const harness = await makeSecureSession({ cwd, responses: [fauxAssistantMessage("done")] });
+    teardown.push(() => harness.dispose());
+    const sessionFile = harness.sessionFile()!;
+    // One turn first, so the transcript exists and the "nothing was appended" check below has
+    // something to be about.
+    await harness.session.prompt("hello");
+    setActiveScopeKey(sessionFile);
+
+    const { runSecCommand } = await import("../../src/commands.ts");
+    const notified: string[] = [];
+    await runSecCommand(`add-from-file ${file}`, vaultForSession(sessionFile), {
+      mode: "tui",
+      hasUI: true,
+      cwd,
+      ui: {
+        notify: (message: string) => void notified.push(message),
+        // Both rows are ticked; the sort is credential-first, then stable.
+        custom: async () => [0, 1],
+      },
+    } as never);
+
+    // The vault really did receive it, so the assertions below are not vacuous.
+    expect(vaultForSession(sessionFile).resolve("imported_key")).toBe(CANARY);
+    expect(vaultForSession(sessionFile).entries().map((e) => e.source)).toEqual(["file", "file"]);
+
+    // The receipt names the key and its length; it must not name the value.
+    expect(notified.join("\n")).toContain("imported_key");
+    expect(notified.join("\n")).not.toContain(CANARY);
+
+    const corpus = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    expect(corpus).not.toContain(CANARY);
+    // Neither the value nor the imported NAME reaches the transcript: nothing was appended.
+    expect(readFileSync(sessionFile, "utf8")).not.toContain("imported_key");
+  });
+});
+
 describe("the last mile — the only place the bytes themselves are observable", () => {
   it("never puts a vaulted value on the wire, including in a compaction summary", async () => {
     // This scenario could not exist before 2026-10-08. pi's before_provider_request

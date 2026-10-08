@@ -74,19 +74,28 @@ describe("the /sec list", () => {
 
   it("always offers Add, and a toggle that names BOTH the subject and the consequence", () => {
     // "Enable for this session" inside a list of per-secret items was read as being about
-    // those items. It is about pi-secure itself, and the two directions have different
+    // those items. It is about pi-secret itself, and the two directions have different
     // consequences, so the label states the subject and spells the consequence out.
     const on = secretRows([], { enabled: true, now: NOW });
-    expect(on.map((r) => r.action.kind)).toEqual(["add", "toggle"]);
-    expect(on[1]!.label).toBe("Turn pi-secure off (clears these secrets)");
+    expect(on.map((r) => r.action.kind)).toEqual(["add", "add-file", "toggle"]);
+    expect(on[2]!.label).toBe("Turn pi-secret off (clears these secrets)");
     const off = secretRows([], { enabled: false, now: NOW });
-    expect(off[1]!.label).toBe("Turn pi-secure on");
+    expect(off[2]!.label).toBe("Turn pi-secret on");
   });
 
   it("is a single list even with nothing in it — the user always has somewhere to go", () => {
     const rows = secretRows([], { enabled: true, now: NOW });
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows.every((r) => r.action.kind !== "entry")).toBe(true);
+  });
+
+  it("offers the file-import row next to Add, with its own shortcut", () => {
+    // §12g's discovery surface: reachable without knowing the verb, same as `Add a secret…`.
+    const rows = secretRows([], { enabled: true, now: NOW });
+    const file = rows.find((r) => r.action.kind === "add-file")!;
+    expect(file.label).toBe("Add from a file…");
+    expect(file.detail).toBe("f");
+    expect(rows.findIndex((r) => r.action.kind === "add")).toBeLessThan(rows.indexOf(file));
   });
 
   it("aligns the detail column so previews line up", () => {
@@ -96,13 +105,13 @@ describe("the /sec list", () => {
   });
 
   it("never truncates an ACTION row to the name column width", () => {
-    // "Turn pi-secure off (clears these secrets)" truncated to "Turn pi-secure off (cle…"
+    // "Turn pi-secret off (clears these secrets)" truncated to "Turn pi-secret off (cle…"
     // loses exactly the part that says what will happen — which is the part that matters.
     const rows = secretRows([entry("gh_pat")], { enabled: true, now: NOW });
     const toggle = rows.at(-1)!;
     const { ui, rendered } = fakeUi([["\x1b"]]);
     void selectList({ ui } as never, "t", rows);
-    const line = rendered.find((l) => l.includes("Turn pi-secure"));
+    const line = rendered.find((l) => l.includes("Turn pi-secret"));
     expect(line).toContain(toggle.label);
   });
 
@@ -164,7 +173,9 @@ describe("driving the list", () => {
     const { ui } = fakeUi([[DOWN, DOWN, ENTER]]);
     expect(await selectList({ ui } as never, "t", rows)).toEqual({ kind: "add" });
     const third = fakeUi([[DOWN, DOWN, DOWN, ENTER]]);
-    expect(await selectList({ ui: third.ui } as never, "t", rows)).toEqual({ kind: "toggle" });
+    expect(await selectList({ ui: third.ui } as never, "t", rows)).toEqual({ kind: "add-file" });
+    const fourth = fakeUi([[DOWN, DOWN, DOWN, DOWN, ENTER]]);
+    expect(await selectList({ ui: fourth.ui } as never, "t", rows)).toEqual({ kind: "toggle" });
     const second = fakeUi([[DOWN, ENTER]]);
     expect(await selectList({ ui: second.ui } as never, "t", rows)).toEqual({ kind: "entry", name: "db_url" });
   });
@@ -194,7 +205,7 @@ describe("driving the list", () => {
 
   it("prints the shortcuts in the footer, since that is the only way they are discoverable", () => {
     const { ui, rendered } = fakeUi([["\x1b"]]);
-    void selectList({ ui } as never, "pi-secure", rows, { a: { kind: "add" }, t: { kind: "toggle" } });
+    void selectList({ ui } as never, "pi-secret", rows, { a: { kind: "add" }, t: { kind: "toggle" } });
     const footer = rendered.join("\n");
     expect(footer).toContain("a");
     expect(footer).toContain("t");
@@ -203,7 +214,7 @@ describe("driving the list", () => {
 
   it("renders a pointer on the selected row and never past the terminal width", () => {
     const { ui, rendered } = fakeUi([["\x1b"]]);
-    void selectList({ ui } as never, "pi-secure", rows);
+    void selectList({ ui } as never, "pi-secret", rows);
     const body = rendered.join("\n");
     expect(body).toContain("❯");
     for (const line of rendered) expect(line.length).toBeLessThanOrEqual(80);
@@ -276,7 +287,7 @@ describe("leaving an entry menu", () => {
  * so it must ask the same question. Guarding only the verb form would leave the shortcut that
  * clears everything unguarded.
  */
-describe("turning pi-secure off from the menu", () => {
+describe("turning pi-secret off from the menu", () => {
   it("asks first, and leaves everything alone when the user declines", async () => {
     setEnabled(true);
     // The REGISTRY instance: the toggle calls dropActiveVault(), which empties the value

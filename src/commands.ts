@@ -1,4 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename } from "node:path";
 import { activeVault, dropActiveVault, type Vault } from "./vault.ts";
 import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
@@ -7,18 +10,22 @@ import { secretLabel } from "./preview.ts";
 import { canShowMenu, entryRows, secretRows, selectList, statusLine } from "./menu.ts";
 import { isEnabled } from "./state.ts";
 import type { PublicEntry } from "./vault.ts";
+import { chooseName, inspectPath, parseDotenv, resolvePathInput } from "./env-file.ts";
+import { chooseAssignments, pickFile, type ChoiceRow } from "./file-import.ts";
+import { isLikelySecret } from "./entropy.ts";
 
 /** The public entry carries its own preview; short values fall back to the digest. */
 const labelOf = (e: PublicEntry): string => e.preview ?? `sha256:${e.fingerprint}`;
 
-const SEC_USAGE = "usage: /sec [add <name> | list | remove <name> | rename <old> <new> | restore <name> | off | on]";
+const SEC_USAGE =
+  "usage: /sec [add <name> | add-from-file [path] | list | remove <name> | rename <old> <new> | restore <name> | off | on]";
 
 // Argument form. The MENU is the primary surface — `/sec` with no arguments opens it — and
 // this list exists as the escape hatch for scripting, for headless sessions where there is no
 // menu to draw, and for the completion provider. `test` used to be here; it printed one entry
 // with a timestamp, which is now a column in the list, so it was redundant and confusingly
 // named (it never contacted any provider, so "test" invited an expectation it never met).
-const VERBS = ["add ", "list", "remove ", "rename ", "restore ", "off", "on"];
+const VERBS = ["add ", "add-from-file ", "list", "remove ", "rename ", "restore ", "off", "on"];
 
 /**
  * One dispatcher rather than eight commands: pi's `registerCommand` takes a bare
@@ -57,7 +64,7 @@ export function registerCommands(pi: ExtensionAPI): void {
  */
 async function confirmClearAll(ctx: ExtensionCommandContext, vault: Vault): Promise<boolean> {
   if (!ctx.hasUI || vault.size() === 0) return true;
-  return ctx.ui.confirm("Disable pi-secure", "CLEAN ALL KEYS, and disable SEC?");
+  return ctx.ui.confirm("Disable pi-secret", "CLEAN ALL KEYS, and disable SEC?");
 }
 
 export async function runSecCommand(
@@ -77,8 +84,8 @@ export async function runSecCommand(
       }
       const off = !isEnabled();
       const header = off
-        ? "pi-secure is OFF for this session — refs do not expand and no values are stored."
-        : `pi-secure is ON — ${vault.size()} secret(s) this session.`;
+        ? "pi-secret is OFF for this session — refs do not expand and no values are stored."
+        : `pi-secret is ON — ${vault.size()} secret(s) this session.`;
       ctx.ui.notify(`${header}\n${formatSecretList(vault.entries())}\n${SEC_USAGE}`, "info");
       return;
 
@@ -160,6 +167,10 @@ export async function runSecCommand(
       return;
     }
 
+    case "add-from-file":
+      await addFromFile(ctx, vault, arg);
+      return;
+
     case "off":
       // Ask BEFORE anything changes: a declined answer must leave the extension enabled with
       // its values intact, which is only possible if the prompt comes first.
@@ -172,7 +183,7 @@ export async function runSecCommand(
       // model context it was going to lose anyway, while un-masking would leak.
       dropActiveVault();
       ctx.ui.notify(
-        "pi-secure disabled for this session — refs will not expand, and this session's values were cleared. " +
+        "pi-secret disabled for this session — refs will not expand, and this session's values were cleared. " +
           "Add them again with /sec add if you need them back.",
         "warning",
       );
@@ -180,7 +191,7 @@ export async function runSecCommand(
 
     case "on":
       setEnabled(true);
-      ctx.ui.notify("pi-secure enabled", "info");
+      ctx.ui.notify("pi-secret enabled", "info");
       return;
 
     default:
@@ -211,14 +222,18 @@ export async function runSecMenu(ctx: ExtensionCommandContext, vault: Vault): Pr
   for (;;) {
     const choice = await selectList(
       ctx,
-      "pi-secure — this session only",
+      "pi-secret — this session only",
       secretRows(vault.entries(), { enabled: isEnabled() }),
-      { a: { kind: "add" }, t: { kind: "toggle" } },
+      { a: { kind: "add" }, f: { kind: "add-file" }, t: { kind: "toggle" } },
       statusLine(isEnabled(), vault.size()),
     );
     if (!choice) return;
     if (choice.kind === "add") {
       await addViaMenu(ctx, vault);
+      continue;
+    }
+    if (choice.kind === "add-file") {
+      await addFromFile(ctx, vault, "");
       continue;
     }
     if (choice.kind === "toggle") {
@@ -228,12 +243,12 @@ export async function runSecMenu(ctx: ExtensionCommandContext, vault: Vault): Pr
         if (!(await confirmClearAll(ctx, vault))) continue;
         setEnabled(false);
         dropActiveVault();
-        ctx.ui.notify("pi-secure disabled and this session's values were cleared", "warning");
+        ctx.ui.notify("pi-secret disabled and this session's values were cleared", "warning");
       } else {
         setEnabled(true);
         // Re-enabling never restores values: /sec off cleared them, and silently bringing
         // secrets back would make the switch meaningless.
-        ctx.ui.notify("pi-secure enabled — add secrets again with /sec", "info");
+        ctx.ui.notify("pi-secret enabled — add secrets again with /sec", "info");
       }
       continue;
     }
@@ -292,6 +307,128 @@ async function entryMenuLoop(
 }
 
 /** Add from the menu: name first (validated before any prompt), then the masked value. */
+/**
+ * spec §12g — ingest assignments from a dotenv file **the user names**.
+ *
+ * The value path here is `readFileSync` → vault and nothing else. No tool result, message or
+ * provider payload ever holds one of these values, which is why §8's scrubbers need no change for
+ * this feature: they are not on the path. The model cannot reach this function at all — it is a
+ * user command, and the tool registry gains nothing (§12g "no tool", the same reasoning as
+ * "no `sec_reveal`").
+ */
+async function addFromFile(ctx: ExtensionCommandContext, vault: Vault, pathArg: string): Promise<void> {
+  const typed = pathArg.trim();
+  let path: string | undefined;
+  if (typed) {
+    path = resolvePathInput(typed, { home: homedir(), cwd: ctx.cwd });
+  } else if (canShowMenu(ctx)) {
+    path = await pickFile(ctx, "pi-secret — add from a file", { cwd: ctx.cwd, home: homedir() });
+    // Cancelled at the picker: nothing was read, so there is nothing to undo.
+    if (!path) return;
+  } else {
+    ctx.ui.notify("usage: /sec add-from-file <path> — the picker needs a terminal", "warning");
+    return;
+  }
+
+  const found = inspectPath(path);
+  if (found.kind !== "file" || found.error) {
+    // `missing` carries no error of its own, so it needs its own wording: telling the user a
+    // path that does not exist is "not a file" sends them looking for a permissions problem.
+    const why =
+      found.error ??
+      (found.kind === "dir" ? "that is a directory" : found.kind === "missing" ? "no such file" : "not a file");
+    ctx.ui.notify(`pi-secret: ${why}: ${path}`, "warning");
+    return;
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    ctx.ui.notify(`pi-secret: cannot read ${path}`, "warning");
+    return;
+  }
+
+  const parsed = parseDotenv(text);
+  if (!parsed.assignments.length) {
+    ctx.ui.notify(`pi-secret: no assignments found in ${basename(path)}`, "warning");
+    return;
+  }
+  if (!canShowMenu(ctx)) {
+    // Which keys to adopt is the whole point of the feature; deciding it for the user would
+    // violate "unticked means absent" in the only way that matters.
+    ctx.ui.notify("pi-secret: choosing which keys to add needs a terminal — nothing was added", "warning");
+    return;
+  }
+
+  // §12g F5: names are decided HERE — against the vault plus the rows already named in this run —
+  // so the name on the row is exactly the name that will be created.
+  const taken = new Set(vault.names());
+  const candidates = parsed.assignments.map((assignment, id) => {
+    const choice = chooseName(assignment.key, taken);
+    if (choice.name) taken.add(choice.name);
+    const notes: string[] = [];
+    if (assignment.flags.includes("unexpanded")) notes.push("unexpanded ref — stored as written");
+    if (assignment.flags.includes("escapes")) notes.push("escapes stored as written");
+    if (choice.name && choice.name !== assignment.key.toLowerCase()) {
+      notes.push(`already in vault → ${choice.name}`);
+    }
+    const row: ChoiceRow = {
+      id,
+      label: choice.name ?? assignment.key,
+      note: choice.reason ?? (notes.length ? notes.join(" · ") : undefined),
+      // spec §12g: the classifier decides the DEFAULT view, and `TAB` reveals the rest.
+      likely: isLikelySecret(assignment.key, assignment.value),
+      disabled: choice.name === undefined,
+    };
+    return { assignment, id, name: choice.name, row };
+  });
+
+  const likely = candidates.filter((c) => c.row.likely).length;
+  const counts = [
+    `${parsed.assignments.length} assignment${parsed.assignments.length === 1 ? "" : "s"}`,
+    likely ? `${likely} look like secret${likely === 1 ? "" : "s"}` : "none look like secrets",
+  ];
+  if (parsed.duplicates) counts.push(`${parsed.duplicates} duplicate collapsed`);
+  if (parsed.skipped) counts.push(`${parsed.skipped} line skipped`);
+
+  // Likely secrets first. A stable sort, so the file's own order survives inside each group —
+  // which is what makes the list still readable when the user flips to every row.
+  const ordered = [...candidates].sort((a, b) => Number(b.row.likely) - Number(a.row.likely));
+
+  const picked = await chooseAssignments(
+    ctx,
+    `pi-secret — ${basename(path)}`,
+    ordered.map((c) => c.row),
+    counts.join(" · "),
+  );
+  if (!picked.length) return;
+
+  const byId = new Map(candidates.map((c) => [c.id, c]));
+  const added: string[] = [];
+  const failures: string[] = [];
+  for (const id of picked) {
+    const chosen = byId.get(id);
+    if (!chosen?.name) continue;
+    try {
+      vault.add(chosen.name, chosen.assignment.value, "file");
+      added.push(`${chosen.name} (len ${chosen.assignment.value.length})`);
+    } catch (err) {
+      // One key failing must not cost the others (§12g F7).
+      failures.push(`${chosen.name}: ${err instanceof Error ? err.message : "could not be added"}`);
+    }
+  }
+
+  if (added.length) {
+    const one = added.length === 1;
+    ctx.ui.notify(
+      `pi-secret: added ${added.length} secret${one ? "" : "s"} from ${basename(path)} — ${added.join(", ")}`,
+      "info",
+    );
+  }
+  for (const failure of failures) ctx.ui.notify(`pi-secret: skipped ${failure}`, "warning");
+}
+
 async function addViaMenu(ctx: ExtensionCommandContext, vault: Vault): Promise<void> {
   const entered = await ctx.ui.input("New secret name", "github_token");
   if (entered === undefined) return;
@@ -316,7 +453,7 @@ async function addViaMenu(ctx: ExtensionCommandContext, vault: Vault): Promise<v
     ctx.ui.notify(
       isEnabled()
         ? `captured sec:${entry.name} · ${labelOf(entry)} · len ${entry.length} · this session only`
-        : `stored sec:${entry.name} · ${labelOf(entry)} · but pi-secure is OFF, so {{sec:${entry.name}}} will NOT expand until you turn it on`,
+        : `stored sec:${entry.name} · ${labelOf(entry)} · but pi-secret is OFF, so {{sec:${entry.name}}} will NOT expand until you turn it on`,
       isEnabled() ? "info" : "warning",
     );
   } catch (error) {

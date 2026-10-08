@@ -20,7 +20,7 @@ export interface Receipt {
  * `ghp_A1b2…Q7R8`, which is what lets a person recognise the key they just pasted without
  * reading it out. Nothing here ever carries the value itself.
  */
-export const RECEIPT_TYPE = "pi-secure-receipt";
+export const RECEIPT_TYPE = "pi-secret-receipt";
 
 export function buildReceiptComponent(receipt: Receipt, theme: Theme): Component {
   const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));

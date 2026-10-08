@@ -14,7 +14,7 @@ export interface ClassifiedRef extends Ref {
  * Three dispositions, and the middle one is the whole point of this module: a
  * ref in a shell context that performs no expansion would otherwise reach the
  * child as the literal text `{{sec:NAME}}`. The model reads that back, concludes
- * pi-secure is broken, and asks the user to paste the token into a command — the
+ * pi-secret is broken, and asks the user to paste the token into a command — the
  * one path this project exists to close. So an unusable ref is reported, never
  * silently executed.
  *

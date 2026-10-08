@@ -18,7 +18,7 @@ if (!canaries.length) {
  *
  * This list used to be `${cwd}/.pi/sessions` alone, which is a directory nothing in
  * this repo ever writes to: the integration suite builds every session under
- * `mkdtempSync(tmpdir(), "pi-secure-sessions-")`, and pi's bash truncation snapshots
+ * `mkdtempSync(tmpdir(), "pi-secret-sessions-")`, and pi's bash truncation snapshots
  * are `tmpdir()/pi-bash*`. With a missing directory silently walked as zero files,
  * the sweep printed "clean" and exited 0 no matter what pi-secure did. A safety gate
  * that cannot fail is worse than no gate, because it buys the appearance of one.
@@ -36,8 +36,8 @@ const tmpEntries = (() => {
 })();
 const DEFAULT_ROOTS = [
   join(process.cwd(), ".pi", "sessions"),
-  ...tmpEntries.filter((n) => n.startsWith("pi-secure-sessions-")).map((n) => join(tmp, n)),
-  ...tmpEntries.filter((n) => n.startsWith("pi-secure-cwd-")).map((n) => join(tmp, n)),
+  ...tmpEntries.filter((n) => n.startsWith("pi-secret-sessions-")).map((n) => join(tmp, n)),
+  ...tmpEntries.filter((n) => n.startsWith("pi-secret-cwd-")).map((n) => join(tmp, n)),
   ...tmpEntries.filter((n) => n.startsWith("pi-bash")).map((n) => join(tmp, n)),
 ];
 const roots = (process.env.SWEEP_ROOTS ? process.env.SWEEP_ROOTS.split(",") : DEFAULT_ROOTS).filter(Boolean);

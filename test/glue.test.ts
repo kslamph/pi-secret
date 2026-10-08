@@ -187,7 +187,7 @@ describe("scrubMessageText", () => {
 
 describe("scrubOutputSnapshot", () => {
   it("rewrites the snapshot file scrubbed and keeps the pointer", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-glue-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-glue-"));
     const file = join(dir, "out.txt");
     writeFileSync(file, `token=${GH}\nAWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n`);
     const details: Record<string, unknown> = { fullOutputPath: file, truncation: {} };
@@ -200,7 +200,7 @@ describe("scrubOutputSnapshot", () => {
   });
 
   it("on ANY failure unlinks the snapshot and deletes the pointer", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-glue-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-glue-"));
     const file = join(dir, "out.txt");
     writeFileSync(file, `token=${GH}\n`);
     const hostile = {
@@ -217,7 +217,7 @@ describe("scrubOutputSnapshot", () => {
   });
 
   it("drops a pointer to a missing file", () => {
-    const details: Record<string, unknown> = { fullOutputPath: join(tmpdir(), "pi-secure-nope-xyz.txt") };
+    const details: Record<string, unknown> = { fullOutputPath: join(tmpdir(), "pi-secret-nope-xyz.txt") };
     scrubOutputSnapshot(details, makeVault());
     expect("fullOutputPath" in details).toBe(false);
   });
@@ -340,7 +340,7 @@ describe("injectToolCall — vaulted LITERALS in tool arguments", () => {
 describe("the truncation snapshot pointer must survive scrubbing", () => {
 
   it("leaves fullOutputPath untouched while still masking its file contents", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-path-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-path-"));
     // A temp path that a credential-shape matcher would happily rewrite.
     const file = join(dir, "password=ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8-out.txt");
     writeFileSync(file, `full output follows\n${GH}\n`);
@@ -401,7 +401,7 @@ describe("the compaction summary entry", () => {
   };
 
   it("rewrites a summary that carries the secret, leaving every other entry byte-identical", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-compact-"));
     try {
       const file = writeSession(dir, `the token is ${GH} and the ref is {{sec:gh_pat}}`);
       const before = readFileSync(file, "utf8").split("\n");
@@ -418,7 +418,7 @@ describe("the compaction summary entry", () => {
   });
 
   it("does not touch the file at all when the summary is already clean", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-compact-"));
     try {
       const file = writeSession(dir, "nothing sensitive, just {{sec:gh_pat}}");
       const before = readFileSync(file, "utf8");
@@ -430,7 +430,7 @@ describe("the compaction summary entry", () => {
   });
 
   it("ignores an unknown entry id rather than rewriting the wrong line", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-secure-compact-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-compact-"));
     try {
       const file = writeSession(dir, `token ${GH}`);
       const before = readFileSync(file, "utf8");
@@ -443,7 +443,7 @@ describe("the compaction summary entry", () => {
 
   it("reports rather than throws when the file cannot be read", () => {
     expect(
-      scrubCompactionSummaryFile(join(tmpdir(), "pi-secure-missing-session.jsonl"), "e2", vaultWith()),
+      scrubCompactionSummaryFile(join(tmpdir(), "pi-secret-missing-session.jsonl"), "e2", vaultWith()),
     ).toEqual({ rewritten: false, hits: 0 });
   });
 });

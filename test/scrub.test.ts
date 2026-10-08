@@ -193,7 +193,7 @@ describe("maskShapes", () => {
     expect(maskShapes(hex64).hits).toBe(0);
     expect(maskShapes(uuid).hits).toBe(0);
     expect(maskShapes("version 1.2.3-beta.4").hits).toBe(0);
-    expect(maskShapes("/home/kslam/piext/pi-secure/src/index.ts").hits).toBe(0);
+    expect(maskShapes("/home/kslam/piext/pi-secret/src/index.ts").hits).toBe(0);
   });
 
   it("leaves ordinary prose alone", () => {

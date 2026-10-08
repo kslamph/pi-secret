@@ -5,7 +5,7 @@ import { expandBash, type BashExpansion } from "../src/substitute.ts";
 import { bashCases, DB, DB_ENV, GH, GH_ENV, SPACED, SPACED_ENV } from "./bash-quote-table.ts";
 
 /** A benign witness: if the value is ever executed as shell, this file appears. */
-const HOSTILE = "$(touch /tmp/pi-secure-pwned)";
+const HOSTILE = "$(touch /tmp/pi-secret-pwned)";
 
 const resolve = (name: string): string | undefined =>
   name === "gh_pat" ? "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8"
@@ -113,7 +113,7 @@ describe("expandBash — bash agrees", () => {
   });
 
   it("a hostile value reaches the child verbatim, never through argv or the shell", async () => {
-    const marker = "/tmp/pi-secure-pwned";
+    const marker = "/tmp/pi-secret-pwned";
     // Ensure the marker does not pre-exist.
     const { unlinkSync } = await import("node:fs");
     try { unlinkSync(marker); } catch { /* ENOENT is expected */ }

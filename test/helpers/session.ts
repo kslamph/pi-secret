@@ -10,7 +10,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import piSecure from "../../src/index.ts";
+import piSecret from "../../src/index.ts";
 
 export interface SecureSessionOptions {
   responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0];
@@ -27,7 +27,7 @@ export interface SecureSessionOptions {
    */
   settings?: Record<string, unknown>;
   /**
-   * Extra extension factories, registered AROUND pi-secure in the order given:
+   * Extra extension factories, registered AROUND pi-secret in the order given:
    * anything before it observes the payload as the agent produced it, anything after
    * it observes what actually leaves the machine. That ordering is the only honest way
    * to assert on the wire in a test — asserting on our own hook's return value would
@@ -40,7 +40,7 @@ export interface SecureSessionOptions {
    *
    * This exists because the faux provider NEVER calls `options.onPayload`, while every
    * real provider does (pi-ai/dist/api/openai-completions.js:204 and its siblings).
-   * So without this shim, pi's `before_provider_request` hook — which pi-secure treats
+   * So without this shim, pi's `before_provider_request` hook — which pi-secret treats
    * as its last mile — silently never fires under the canary suite. Measured: with the
    * faux provider, `agent_start`, `context`, `message_end`, `tool_call` and
    * `tool_result` all fire, and `before_provider_request` fires ZERO times. The suite
@@ -101,13 +101,13 @@ export async function makeSecureSession(options: SecureSessionOptions) {
       };
     provider = { ...faux.provider, stream: wrap(api.stream as never), streamSimple: wrap(api.streamSimple as never) };
   }
-  const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-secure-cwd-"));
+  const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-secret-cwd-"));
   // An explicit sessionDir keeps every artifact inside a temp dir the sweep can
   // scan; the default resolves under the real ~/.pi/agent/sessions.
-  const sessionDir = mkdtempSync(join(tmpdir(), "pi-secure-sessions-"));
+  const sessionDir = mkdtempSync(join(tmpdir(), "pi-secret-sessions-"));
   // DefaultResourceLoaderOptions requires agentDir; a fresh temp one keeps the
   // real user config/extensions out of the sweep.
-  const agentDir = mkdtempSync(join(tmpdir(), "pi-secure-agent-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-secret-agent-"));
   if (options.settings) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
   // The SettingsManager must be bound to the SAME temp agentDir, or it silently
   // defaults to the real ~/.pi/agent and the suite inherits the developer's own
@@ -119,9 +119,9 @@ export async function makeSecureSession(options: SecureSessionOptions) {
     cwd,
     agentDir,
     extensionFactories: [
-      { name: "pi-secure-faux-provider", factory: (pi) => pi.registerProvider(provider as never) },
+      { name: "pi-secret-faux-provider", factory: (pi) => pi.registerProvider(provider as never) },
       ...(options.probeExtensionFactories ?? []).slice(0, 1),
-      { name: "pi-secure", factory: piSecure },
+      { name: "pi-secret", factory: piSecret },
       ...(options.probeExtensionFactories ?? []).slice(1),
     ],
   });

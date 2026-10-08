@@ -1,36 +1,82 @@
-# pi-secure
+# pi-secret
 
-pi-secure is an extension for the [pi](https://github.com/badlogic/pi-mono) coding agent that keeps credentials out of everything an LLM endpoint can see — request bodies, session files, transcripts, exports — while letting the model *use* those credentials in shell commands and tool calls without friction. You should never have to paste a token into a conversation, and if you do, it should not end up in the conversation.
+**Give the agent your API keys without ever showing it your API keys.**
 
-> **Status:** the extension is wired and the canary sweep passes — `npm test` and
-> `npm run test:canary` (7 end-to-end scenarios plus a filesystem sweep) are green, and the vault,
-> capture, injection and scrubbing paths all run inside pi. Known gaps are listed under **Status and
-> known gaps** below; read them before relying on this for anything you cannot afford to leak.
+pi-secret is an extension for the [pi](https://pi.dev/) coding agent. You paste a
+credential once; from then on the model uses it by *name* — `{{sec:github_token}}` — and the real value is
+substituted only at the moment the command runs.
 
-## The `{{sec:NAME}}` contract
+Nothing else changes. Your token is not in the prompt, not in the request body, not in the session
+file, not in `/export`, not in a resumed transcript. But the command that needs it still works.
 
-The model learns exactly one rule:
+```
+you:    /sec add github_token          →  paste it once, masked
+model:  curl -H "Authorization: Bearer {{sec:github_token}}" https://api.github.com/user
+        └─ the shell gets the real token; the model only ever sees that line
+```
 
-- Reference credentials as `{{sec:NAME}}` in bash commands and tool arguments. The value is substituted at execution time and is never visible to the model.
-- Names match `/^[a-z][a-z0-9_-]{0,63}$/`.
-- Use the `sec_list` tool to see available names. Never ask the user to paste a secret, token, password, or API key.
-- If a `sec:` reference is rejected, call `sec_list` and retry with a valid name.
+If a command echoes the token back in its output, the model reads `{{sec:github_token}}` again — not `***`, not a
+redaction marker. It can hand that straight to its next command, which is the whole point: masking
+that destroys the name breaks the round trip, so this one doesn't.
 
-Round-trip property: masking replaces a value with **the ref**, not `***`. When a command echoes a token or an error page dumps one, the model reads back `Authorization: Bearer {{sec:gh_token}}` and can paste that straight into its next command.
+## Install
 
-Secrets live in memory for the current session only — never persisted, never reused across `/new`, `/fork`, `/resume`.
+```sh
+pi install npm:pi-secret
+```
+
+Other ways in:
+
+```sh
+pi install /path/to/pi-secret                    # working checkout
+pi install git:github.com/kslamph/pi-secret      # straight from git
+pi -e npm:pi-secret                              # try it ephemerally, no install
+```
+
+## Quick start
+
+```
+/sec add github_token      masked prompt; paste, press enter
+/sec                       the menu: what's stored, and what you can do with it
+```
+
+Then just tell the agent to use it. It reads `{{sec:NAME}}` and runs
+`curl -H "Authorization: Bearer {{sec:github_token}}" https://api.github.com/user`. To see the value yourself, use
+`/sec` → the entry → **Copy value to clipboard** (`/sec restore github_token` headless). It goes to
+the clipboard and nowhere else — not to the input line, because an editor line is text you submit,
+and that would put it back in the transcript.
+
+## What it does
+
+- **Masked entry.** `/sec add` shows a pi dialog where every character renders as a bullet. The
+  value never reaches a rendered node, so there is no frame to screenshot.
+- **Refs, not replacements.** `{{sec:NAME}}` works in bash commands and tool arguments. The value is
+  injected into the child process's environment for that one call — `process.env` itself stays clean,
+  so one command's secret cannot reach another concurrent command.
+- **Round-trip masking.** Values are masked by *equality* — including base64, hex, URL-encoded and
+  uppercase-hex forms — and by *shape*: provider prefixes (`ghp_`, `sk-`, `AKIA…`, `xox…`, `glpat-`,
+  `npm_`, `hf_`), PEM blocks, JWTs, and `password=` / `api_key:` / `token:` pairs.
+- **Capture on paste.** Paste a credential into the conversation by accident and it is captured into
+  the vault and rewritten to a ref *before* anything is persisted. A receipt line names it — the
+  name, length and a masked preview, never the value.
+- **Import from a file.** `/sec add-from-file` reads a `.env` you name, lists what it found, and adds
+  the ones you tick. It shows variable *names* only, hides what does not look like a secret (`TAB`
+  reveals everything), and reads nothing until you type a path. Your file is never written to.
+- **File reads are masked too.** `read`, `grep`, `find` and `ls` output has credential shapes masked
+  by default (`--sec-file-reads=false` to opt out).
+- **Session-scoped.** Values live in memory, keyed to one session file. They survive `/reload` and
+  are gone on `/new`, `/fork`, `/resume` and exit. `/sec off` clears them immediately, and asks first.
+- **Autocomplete.** Typing the ref prefix in the editor completes from the vault — names only, never
+  values.
+- **Model-facing list.** `sec_list` tells the model which names exist, with a masked preview and the
+  length. There is no reveal tool, and there never will be one.
 
 ## `/sec`
 
-One command, and with no arguments it opens a **menu** — you should never have to remember a
-subcommand:
+With no arguments it opens a menu, so you never have to remember a subcommand:
 
 ```
-/sec
-```
-
-```
-─ pi-secure — this session only ──────────────────────────────
+─ pi-secret — this session only ──────────────────────────────
 
   ON · refs expand · output scrubbed · 2 secrets this session
 
@@ -38,120 +84,94 @@ subcommand:
     db_url                    sha256:a1b2c3d4 · len 41 · prompt · 1h ago
 
     Add a secret…                                              a
-    Turn pi-secure off (clears these secrets)                  t
+    Add from a file…                                           f
+    Turn pi-secret off (clears these secrets)                  t
 
- ↑/↓ move · enter select · a/t shortcuts · esc close
-```
-
-The line under the title is **pi-secure's state**, not the list's contents — it is deliberately
-separate from the toggle at the bottom, which is the action. With the switch off the panel says so:
-
-```
-  OFF · refs do NOT expand · no values stored
-
-    Add a secret…                                              a
-    Turn pi-secure on                                           t
+ ↑/↓ move · enter select · a/f/t shortcuts · esc close
 ```
 
 Enter on a secret opens what you can do with it:
 
 | Row | Key | What it does |
 |---|---|---|
-| Copy value to clipboard | `c` | The only way to see the value. It goes to your clipboard, never to the editor line — typing it there would persist it in the transcript. |
-| Rename… | `r` | Asks for the new name, validated before anything moves. |
+| Copy value to clipboard | `c` | The only way to see the value. Clipboard only — never the editor line. |
+| Rename… | `r` | Validated before anything moves. |
 | Remove from this session | `d` | Asks for confirmation first. |
 | Back | `esc` | |
 
-`Add a secret…` asks for a name, then shows the masked prompt where every character renders as
-`•`; the length and preview are shown on confirm. `enter` stores it, `esc` or `ctrl+c` cancels —
-the prompt is a normal pi overlay dialog, so it looks and behaves like the name step and the
-menus above it. `Turn pi-secure off` (`t`) stops ref injection
-and capture and **clears the values**; turning it back on re-enables the mechanism but does not
-restore them, so anything added while it was off says so when it is stored.
-
-Without a terminal to draw a menu in (headless, scripted), `/sec` prints the same list as text.
-The argument form still works everywhere and is the escape hatch:
+The argument form works everywhere, including headless sessions:
 
 | Form | Effect |
 |---|---|
 | `/sec add <name>` | Masked prompt, then store. This session only. |
-| `/sec list` | Name, masked preview, length, source and time, one per line. |
-| `/sec remove <name>` / `/sec rename <old> <new>` | Forget or rename. |
-| `/sec restore <name>` | Copy the value to the clipboard — not into the input line, not into chat, not into a tool result. There is no `sec_reveal` tool, and there never will be one. |
+| `/sec add-from-file [path]` | Pick a `.env` (or pass a path), tick the variables to add. |
+| `/sec list` | Name, masked preview, length, source and age, one per line. |
+| `/sec rename <old> <new>` | Rename, or `/sec remove <name>` to forget it. |
+| `/sec restore <name>` | Copy the value to the clipboard. |
+| `/sec off` / `/sec on` | Stop or resume. `off` clears this session's values, after a confirmation. |
 
-Pasting a credential into the conversation also works: high-confidence secrets are captured into the vault and rewritten to a ref before anything is persisted, with a receipt line left in the transcript (name, length, fingerprint — never the value).
+## How it works
 
-## Install
+Three ideas, and the interesting one is the third:
 
-```sh
-# local checkout
-pi install /home/kslam/piext/pi-secure
+1. **A vault, in memory only.** Never written to the session JSONL, custom entries, tool `details`,
+   logs or temp files. Keyed by session file, so `/reload` keeps it and `/new` does not.
+2. **A reference the model can read but not resolve.** The model writes the ref; that text is what
+   gets persisted, so every transcript, export and resume carries the ref.
+3. **Expansion at the last moment.** For a bash call, the ref is rewritten to a per-call environment
+   variable that exists only in that child process.
 
-# published release
-pi install git:github.com/kslamph/pi-secure@vX.Y.Z
-```
-
-## Status and known gaps
-
-Working: capture-on-paste, the `/sec` command family, masked entry, clipboard-only restore,
-`{{sec:NAME}}` expansion through bash (child env only) and other tool arguments, value-exact and
-shape scrubbing at `tool_result`, `message_end`, `context` and `before_provider_request`, rewriting
-of pi's truncated-output snapshot, and amendment of compaction summaries in the session file (the one
+Every outbound surface is then scrubbed as a backstop: `tool_result`, `context`, `message_end` and
+`before_provider_request`, plus pi's truncated-output snapshots and compaction summaries (the one
 model-authored text pi persists without passing through `message_end`).
 
-The canary suite asserts on what actually leaves the machine, not only on files: pi-ai's real
-provider implementations invoke `options.onPayload` but the faux provider does not, so the harness
-injects that callback itself — otherwise `before_provider_request` would never run under test and the
-central claim above would be asserted by nothing.
+*Why it is built this way* — and what each layer is actually load-bearing for — is in
+[`docs/superpowers/specs/2026-09-12-pi-secret-design.md`](docs/superpowers/specs/2026-09-12-pi-secret-design.md).
 
-Also working now: `{{sec:NAME}}` completes in the editor from the vault (names only), and a bash
-command that would write a ref to a file warns **you** — never the model — while still running.
+## Security model — read this
 
-### What is actually load-bearing
+**Defending against:** an endpoint that *records* what you send it. A reseller, a random
+OpenAI-compatible proxy, a gateway with retention, a human reading logs. The token must not be in the
+bytes that leave the machine, nor in the transcript that would reveal it on a later turn.
 
-`context`, `message_end` and `tool_result` are the guarantee: they fire on every request and
-before anything is persisted. `before_provider_request` is an **extra, provider-dependent** layer —
-pi-ai invokes it from inside each provider's own api implementation, and pi-secure measures whether
-it actually ran (it tells you once if a provider never invokes it, rather than degrading silently).
+**Not defending against:** an endpoint that *actively attacks* you by steering the model to
+exfiltrate. That is not solvable at this layer, and pretending otherwise would be worse than saying
+so:
 
-spec §3's table of pi internals is executable: `test/mechanics.test.ts` asserts each one, so a pi
-upgrade that moves something fails by name instead of surfacing later as a mystery.
+- `bash` gives the model your user's full read access — `~/.aws/credentials`, `~/.ssh`,
+  `~/.pi/agent/auth.json`, any `.env` in the repo.
+- A ref is a capability handle. Whoever can direct the model can spend it, and can reconstruct a
+  value with shell slicing (`printf '%s' "$VAR" | cut -c1-8`), because masking matches whole known
+  values.
+- Values are delivered through the child's environment, which is readable at `/proc/<pid>/environ`
+  by anything running as you, for as long as the command runs.
+- pi ships no sandbox by design.
 
-Known gaps, in rough order of how much they should worry you:
+For a hostile endpoint the answer is a sandbox boundary with egress substitution — see pi's
+`docs/containerization.md` (the `sbx` pattern). pi-secret complements that; it does not replace it.
 
-1. **`read`/`grep` on a credential file re-opens the hole** if you turn the flag off. Masking is
-   now the **default** (it used to be opt-in, which left this as the design's largest hole: the flag
-   only ever affected `read`/`grep`/`find`/`ls`, while `cat` of the same file through `bash` was
-   always masked, so the old default closed one side door and left the front one open). Pass
-   `--sec-file-reads=false` only when you need to round-trip a credential-bearing file through
-   `read` → `edit`; the cost is that the raw contents reach your endpoint.
-2. **Transformed secrets escape masking.** `base64`, `cut`, `rev`, hashing — shape matching is
-   hygiene, not a boundary. A *truncated* encoding is now masked (Task 16, window match on the
-   head/tail of each derived encoding); only a run cut mid-wrap degrades to masked-up-to-the-wrap,
-   which is pinned as an accepted residual.
-3. **Bash lexical coverage was partial; Task 15 phase 2 closed it.** Unusual heredoc delimiters
-   (`<<1`, `<<E-O-F`, `<<EOF.txt`), heredoc operators inside comments, `$((…<<…))` arithmetic
-   context, and subshell-vs-command-substitution `)` are all handled by the single-pass scanner.
-4. **`!` user-bash pastes are not captured** (known hole). `/export` round-trip is now covered by
-   an integration test that exports the real session to HTML and greps the payload.
-5. **A child process's environment is readable by any process of the same user.** `bash` already
-   hands the model your user's full read access (`~/.ssh`, `~/.aws/credentials`, pi's own
-   `auth.json`), so this is not a new hole — but it belongs in the record: the value is delivered
-   through the child's environment, which is `owner`-readable at `/proc/<pid>/environ` for as long
-   as the command runs. A fd-based handoff would avoid it and needs spawn support from pi.
-6. No defense against an actively hostile endpoint — see the threat model below.
+### Known gaps
 
-## Explicit threat model
+1. **Transformed secrets can escape masking.** `base64 | cut` in combination, hashing, or a slice
+   taken mid-encoding degrades to masked-up-to-the-wrap. Shape matching is hygiene, not a boundary.
+2. **`!` user-bash output is not captured** into the vault.
+3. **A child process's environment is readable by the same user** (above) — a file-descriptor
+   handoff would avoid it and needs spawn support from pi.
+4. **File imports are dotenv only** — no JSON/YAML/INI, and no `$VAR` interpolation: values are
+   stored exactly as written and flagged when they contain an unexpanded reference.
 
-**What we are defending against:** a model endpoint that **records** what you send it — a reseller, a random OpenAI-compatible proxy, a gateway with retention, a human reviewing logs. The token must simply never be in the bytes that leave the machine, nor in the transcript that would reveal it on a later turn.
+## Development
 
-**What we are explicitly *not* defending against:** an endpoint that **actively attacks you** by steering the model to exfiltrate. That is not solvable at this layer, and pretending otherwise is worse than saying so:
+```sh
+npm test             # unit, component and integration tests
+npm run typecheck    # tsc --noEmit
+npm run test:canary  # end-to-end: assert secrets never reach a transcript, then sweep the filesystem
+```
 
-- `bash` gives the model (and therefore its puppeteer) full read access as your user: `~/.aws/credentials`, `~/.ssh`, `~/.pi/agent/auth.json`, any `.env` in the repo.
-- A ref is a capability handle. Anyone who can direct the model can spend it, and can reconstruct any secret by slicing it in a shell (`printf '%s' "$VAR" | cut -c1-8`), because redaction matches whole known values.
-- pi ships **no sandbox** by design.
-
-For an actively hostile endpoint the answer is a sandbox boundary with egress substitution — see pi's `docs/containerization.md` (the `sbx` pattern). pi-secure is a complement to that, not a substitute.
+The canary suite is the gate that matters: it drives real sessions and asserts on what actually
+leaves the machine, including the provider payload — pi-ai's real providers invoke `options.onPayload`
+and the faux provider does not, so the harness injects that callback itself. A separate sweep then
+greps every session, snapshot and temp file for the canary and fails the build on a hit.
 
 ## License
 

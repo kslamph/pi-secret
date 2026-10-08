@@ -1,7 +1,11 @@
 import { fileURLToPath } from "node:url";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import piSecure from "../src/index.ts";
+import piSecret from "../src/index.ts";
 import { activeScopeKey, setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
 import { isEnabled, setEnabled } from "../src/state.ts";
 import { runSecCommand } from "../src/commands.ts";
@@ -60,7 +64,7 @@ const ctx = {
   signal: undefined,
 };
 
-describe("pi-secure wiring", () => {
+describe("pi-secret wiring", () => {
   // Every test in this file shares session file "/tmp/s.jsonl", and the vault
   // registry is module-global — so without this, an earlier capture leaves its
   // name (e.g. gh_deploy) bound to the shared canary value and a later test that
@@ -73,23 +77,23 @@ describe("pi-secure wiring", () => {
 
   it("registers the command surface and receipt renderer at load", () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     expect([...h.commands.keys()]).toEqual(["sec"]);
-    expect(h.entryRenderers.has("pi-secure-receipt")).toBe(true);
+    expect(h.entryRenderers.has("pi-secret-receipt")).toBe(true);
   });
 
   it("registers the sec_list tool and the wrapped bash tool on session_start", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     expect([...h.tools.keys()]).toEqual([]); // cwd-bound: registered per session
     await h.fire("session_start", { reason: "startup" }, ctx);
     expect([...h.tools.keys()].sort()).toEqual(["bash", "sec_list"]);
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-secure", "sec: 0 active");
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("pi-secret", "sec: 0 active");
   });
 
   it("installs every hook in the data-flow diagram", () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     for (const type of ["session_start", "session_shutdown", "input", "tool_call", "tool_result", "context", "before_provider_request"]) {
       expect(h.registered().has(type), type).toBe(true);
     }
@@ -97,7 +101,7 @@ describe("pi-secure wiring", () => {
 
   it("scopes the vault to the session file on session_start", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     dropSessionVault("/tmp/s.jsonl");
     await h.fire("session_start", { reason: "startup" }, ctx);
     setActiveScopeKey("/tmp/s.jsonl");
@@ -107,7 +111,7 @@ describe("pi-secure wiring", () => {
 
   it("drops vault values on new/fork/resume/quit and keeps them on reload", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     await h.fire("session_start", { reason: "startup" }, ctx);
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     await h.fire("session_shutdown", { reason: "reload" }, ctx);
@@ -118,7 +122,7 @@ describe("pi-secure wiring", () => {
 
   it("captures pasted secrets on the input event", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     await h.fire("session_start", { reason: "startup" }, ctx);
     const out = (await h.fire("input", { text: `deploy with ${GH}`, images: [], source: "interactive" }, ctx)) as {
       action: string;
@@ -135,7 +139,7 @@ describe("pi-secure wiring", () => {
 
   it("does not re-capture a message that only holds refs", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     await h.fire("session_start", { reason: "startup" }, ctx);
     const out = (await h.fire("input", { text: "use {{sec:gh_pat}}", source: "interactive" }, ctx)) as
       | { action?: string }
@@ -148,7 +152,7 @@ describe("pi-secure wiring", () => {
 
   it("never captures a git SHA from input", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const out = (await h.fire("input", { text: "revert 4f9c1a7e2b8d0a3c5e7f1b3d9a2c4e6f8b0d2a4c please", source: "interactive" }, ctx)) as
       | { action?: string }
       | undefined;
@@ -157,7 +161,7 @@ describe("pi-secure wiring", () => {
 
   it("expands refs on tool_call and blocks in writes", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const bashInput = { command: 'printf %s "{{sec:gh_pat}}"' };
@@ -178,7 +182,7 @@ describe("pi-secure wiring", () => {
 
   it("scrubs values and shapes out of tool results", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const out = (await h.fire(
@@ -193,7 +197,7 @@ describe("pi-secure wiring", () => {
 
   it("never echoes tool_result input into an error", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const out = (await h.fire(
@@ -206,7 +210,7 @@ describe("pi-secure wiring", () => {
 
   it("scrubs the provider payload as the last mile", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const payload = { messages: [{ role: "user", content: `deployed ${GH}` }] };
@@ -223,7 +227,7 @@ describe("pi-secure wiring", () => {
 
   it("honors `/sec off` and `/sec on`", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
     h.commands.forEach((v, k) => commands.set(k, (v as { handler: never }).handler as never));
     await h.fire("session_start", { reason: "startup" }, ctx);
@@ -317,7 +321,7 @@ describe("message_end — the model's own message is persisted before any tool r
     // session file first. pi runs message_end before appendMessage and rewrites
     // the finalized message in place, so this is the only place it can be caught.
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     await h.fire("session_start", { reason: "startup" }, ctx);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
@@ -332,7 +336,7 @@ describe("message_end — the model's own message is persisted before any tool r
 
   it("leaves a clean message untouched (no spurious rewrite)", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     await h.fire("session_start", { reason: "startup" }, ctx);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
@@ -352,7 +356,7 @@ describe("message_end — the model's own message is persisted before any tool r
 describe("the three hooks pi would silently skip on a throw", () => {
   it("message_end redacts rather than returning the untouched message", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     // Make the live session vault's value enumeration throw.
@@ -372,7 +376,7 @@ describe("the three hooks pi would silently skip on a throw", () => {
 
   it("before_provider_request redacts rather than returning the untouched payload", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     const live = vaultForSession("/tmp/s.jsonl");
     live.add("gh_pat", GH, "prompt");
@@ -387,7 +391,7 @@ describe("the three hooks pi would silently skip on a throw", () => {
 
   it("context redacts rather than returning the untouched messages", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     const live = vaultForSession("/tmp/s.jsonl");
     live.add("gh_pat", GH, "prompt");
@@ -463,7 +467,7 @@ describe("bash redirect warning — user only, and never blocking", () => {
 
   it("warns the user when a bash command writes a ref to a file", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const n = notify();
@@ -480,7 +484,7 @@ describe("bash redirect warning — user only, and never blocking", () => {
 
   it("does not warn for a ref that is not written anywhere", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
     const n = notify();
@@ -494,7 +498,7 @@ describe("bash redirect warning — user only, and never blocking", () => {
 
   it("does not warn about ordinary redirection with no ref", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     setActiveScopeKey("/tmp/s.jsonl");
     const n = notify();
     await h.fire("tool_call", { toolName: "bash", input: { command: "echo hi > out.txt" } }, {
@@ -514,7 +518,7 @@ describe("bash redirect warning — user only, and never blocking", () => {
 describe("the editor surface", () => {
   it("registers one autocomplete factory on the UI context at session start", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const addAutocompleteProvider = vi.fn();
     const uiCtx = {
       ...ctx,
@@ -544,7 +548,7 @@ describe("the editor surface", () => {
   it("survives a headless session with no UI context", async () => {
     // A throw here would abort session_start, taking the whole extension with it.
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const brokenUi = { ...ctx, ui: {} as never, hasUI: false };
     await expect(h.fire("session_start", { reason: "startup" }, brokenUi)).resolves.not.toThrow();
   });
@@ -564,7 +568,7 @@ function defaultFlagHarness(value: boolean): { getFlag: () => boolean } {
 describe("the file-read masking default", () => {
   it("registers the flag as default-true", () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const flag = (h.pi.registerFlag as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
       (c) => c[0] === "sec-file-reads",
     );
@@ -618,7 +622,7 @@ describe("the file-read masking default", () => {
  * deliberate (masking is a filter, not a capability: extra masking can only cost context,
  * while un-masking would leak). Keeping the vault was harder to justify: with the values
  * still in memory, anything that can reach the injection path can still spend them, and
- * "I turned pi-secure off" should mean no capability is handed out at all.
+ * "I turned pi-secret off" should mean no capability is handed out at all.
  */
 describe("/sec off is a real off", () => {
   it("empties the vault, so a ref cannot be expanded afterwards", async () => {
@@ -756,7 +760,7 @@ describe("the provider-level net is measured, not assumed", () => {
 
   it("says nothing while the hook is firing", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const n = notify();
     const uiCtx = { ...ctx, ui: { ...ctx.ui, notify: n } };
     await h.fire("session_start", { reason: "startup" }, uiCtx);
@@ -767,7 +771,7 @@ describe("the provider-level net is measured, not assumed", () => {
 
   it("warns exactly once when a turn completes and the hook never fired", async () => {
     const h = harness();
-    piSecure(h.pi);
+    piSecret(h.pi);
     const n = notify();
     const uiCtx = { ...ctx, ui: { ...ctx.ui, notify: n } };
     await h.fire("session_start", { reason: "startup" }, uiCtx);
@@ -776,8 +780,156 @@ describe("the provider-level net is measured, not assumed", () => {
     await h.fire("turn_end", { turn: 3 }, uiCtx);
     const warnings = n.mock.calls.filter((c) => String(c[0]).includes("provider"));
     expect(warnings).toHaveLength(1);
-    // The message must say what STILL applies, or it reads as "pi-secure is broken".
+    // The message must say what STILL applies, or it reads as "pi-secret is broken".
     expect(String(warnings[0]![0])).toMatch(/context|message_end|tool_result/i);
     expect(String(warnings[0]![0])).not.toContain("disabled");
+  });
+});
+
+/**
+ * spec §12g — the file-import flow at the command level.
+ *
+ * The two screens are covered by their own tests; what matters here is the wiring: that the verb
+ * exists in both forms, that the source label is recorded, that the receipt names keys and never
+ * values, and that the guards refuse rather than guess.
+ */
+describe("/sec add-from-file", () => {
+  const CANARY = "ghp_WIRECANARYWIRECANARYWIRECANARYWIRECANARY";
+  function envFile(content: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-wire-file-"));
+    const file = join(dir, ".env");
+    writeFileSync(file, content);
+    return file;
+  }
+  /** A context whose UI answers the chooser with `pick` (ids of the rows to adopt). */
+  function ctxWith(dir: string, pick: number[], notify = vi.fn()) {
+    return { ctx: { mode: "tui" as const, hasUI: true, cwd: dir, ui: { notify, custom: async () => pick } }, notify };
+  }
+
+  it("adds the ticked keys, labelled as coming from a file", async () => {
+    const file = envFile(`API_KEY=${CANARY}\nPORT=8080\n`);
+    const vault = new Vault("wire-file-1");
+    // Sorted credential-first, then stable: API_KEY (0) precedes PORT (1).
+    const { ctx, notify } = ctxWith(dirname(file), [0]);
+    await runSecCommand(`add-from-file ${file}`, vault, ctx as never);
+    expect(vault.names()).toEqual(["api_key"]);
+    expect(vault.entries()[0]!.source).toBe("file");
+    expect(vault.resolve("api_key")).toBe(CANARY);
+    const receipt = notify.mock.calls[0]![0] as string;
+    expect(receipt).toContain("api_key");
+    expect(receipt).toContain("from .env");
+    // The receipt must not carry the value — only its name and length.
+    expect(JSON.stringify(notify.mock.calls)).not.toContain(CANARY);
+  });
+
+  it("adds nothing when the user ticks nothing", async () => {
+    const file = envFile(`API_KEY=${CANARY}\n`);
+    const vault = new Vault("wire-file-2");
+    const { ctx, notify } = ctxWith(dirname(file), []);
+    await runSecCommand(`add-from-file ${file}`, vault, ctx as never);
+    expect(vault.names()).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("suffixes rather than overwriting a name already in the vault (F4/F5)", async () => {
+    const file = envFile(`API_KEY=${CANARY}\n`);
+    const vault = new Vault("wire-file-3");
+    vault.add("api_key", "already-here", "prompt");
+    const { ctx, notify } = ctxWith(dirname(file), [0]);
+    await runSecCommand(`add-from-file ${file}`, vault, ctx as never);
+    expect(vault.names().sort()).toEqual(["api_key", "api_key1"]);
+    expect(vault.resolve("api_key1")).toBe(CANARY);
+    // The row said api_key1, and the receipt says api_key1: the shown name is the created name.
+    expect(notify.mock.calls[0]![0]).toContain("api_key1");
+  });
+
+  it("never adds a row it could not name, even if the id comes back ticked", async () => {
+    const file = envFile("2FA_TOKEN=abcdefgh1234\n");
+    const vault = new Vault("wire-file-4");
+    const { ctx } = ctxWith(dirname(file), [0]);
+    await runSecCommand(`add-from-file ${file}`, vault, ctx as never);
+    expect(vault.names()).toEqual([]);
+  });
+
+  it("refuses a directory, a missing path and a file with no assignments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-secret-wire-dir-"));
+    const vault = new Vault("wire-file-5");
+    const a = ctxWith(dir, []);
+    await runSecCommand(`add-from-file ${dir}`, vault, a.ctx as never);
+    expect(a.notify.mock.calls[0]![0]).toContain("directory");
+
+    const b = ctxWith(dir, []);
+    await runSecCommand(`add-from-file ${join(dir, "nope.env")}`, vault, b.ctx as never);
+    expect(b.notify.mock.calls[0]![0]).toMatch(/no such file/);
+
+    const empty = envFile("# only comments\n\n");
+    const c = ctxWith(dir, []);
+    await runSecCommand(`add-from-file ${empty}`, vault, c.ctx as never);
+    expect(c.notify.mock.calls[0]![0]).toMatch(/no assignments/);
+    expect(vault.names()).toEqual([]);
+  });
+
+  it("needs a terminal to choose, and says so instead of adding everything", async () => {
+    const file = envFile(`API_KEY=${CANARY}\nPORT=8080\n`);
+    const vault = new Vault("wire-file-6");
+    const notify = vi.fn();
+    await runSecCommand(`add-from-file ${file}`, vault, { mode: "print", hasUI: false, ui: { notify } } as never);
+    expect(vault.names()).toEqual([]);
+    expect(notify.mock.calls[0]![0]).toMatch(/terminal/i);
+  });
+
+  it("explains the usage when there is no path and no terminal to pick one in", async () => {
+    const vault = new Vault("wire-file-7");
+    const notify = vi.fn();
+    await runSecCommand("add-from-file", vault, { mode: "print", hasUI: false, ui: { notify } } as never);
+    expect(notify.mock.calls[0]![0]).toMatch(/usage/i);
+    expect(vault.names()).toEqual([]);
+  });
+
+  it("never renders a value while the chooser is on screen (F6)", async () => {
+    // The chooser builds its chrome from pi's parts, and `DynamicBorder` reads the theme singleton.
+    initTheme("dark");
+    const file = envFile(`API_KEY=${CANARY}\nPORT=8080\n`);
+    const vault = new Vault("wire-file-8");
+    let screen: { render(width: number): string[] } | undefined;
+    const ctx = {
+      mode: "tui" as const,
+      hasUI: true,
+      cwd: dirname(file),
+      ui: {
+        notify: vi.fn(),
+        custom: (factory: never) => {
+          screen = (factory as never as (
+            tui: unknown,
+            theme: unknown,
+            kb: unknown,
+            done: (v: unknown) => void,
+          ) => { render(width: number): string[] })(
+            { requestRender() {} },
+            { fg: (_c: string, t: string) => t },
+            {},
+            () => {},
+          );
+          return new Promise(() => {});
+        },
+      },
+    };
+    void runSecCommand(`add-from-file ${file}`, vault, ctx as never);
+    await Promise.resolve();
+    const shown = screen!.render(100).join("\n");
+    // The name signal found it, and the flow really did classify: `PORT` is vetoed by name and
+    // must not be in the default view (F8). Without this the F6 canary check would pass even if
+    // every row were shown.
+    expect(shown).toContain("api_key");
+    expect(shown).not.toContain("port");
+    expect(shown).toContain("TAB show all");
+    expect(shown).not.toContain(CANARY);
+  });
+
+  it("completes as a verb, so it is discoverable without the docs", () => {
+    const h = harness();
+    piSecret(h.pi);
+    const spec = h.commands.get("sec") as { getArgumentCompletions: (p: string) => { value: string }[] | null };
+    expect(spec.getArgumentCompletions("add")?.map((i) => i.value)).toContain("add-from-file ");
   });
 });

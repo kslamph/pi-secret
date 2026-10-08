@@ -1,5 +1,5 @@
 import { MIN_SCRUBABLE_LENGTH, derivedForms } from "./refs.ts";
-import { PROVIDER_PREFIX_SOURCES, isDigestShaped } from "./entropy.ts";
+import { PROVIDER_PREFIX_SOURCES, SENSITIVE_NAME_SOURCE, isDigestShaped } from "./entropy.ts";
 
 export interface SecretProvider {
   values(): string[];
@@ -70,7 +70,10 @@ const JWT_RE = String.raw`eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0
 // text scrubbed twice loses every name permanently. Verified by measurement: without it
 // `password=<real gh token>` degrades on the second pass; with it the name survives and
 // genuine KV-shaped secrets (`api_key = wJalrXUt…`) still mask to the generic marker.
-const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|private[_-]?key)[A-Za-z0-9_\-]*["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>]{8,})`;
+// The word list is shared with `entropy.ts` (§12g's classifier is its third consumer): a name that
+// says "token" or "api_key" is a secret-shaped name in every context this project has, and two
+// copies of that judgement is the drift the design keeps paying for.
+const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:${SENSITIVE_NAME_SOURCE})[A-Za-z0-9_\-]*["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>]{8,})`;
 
 /**
  * Excluded wholesale. The git-SHA rule matters most: pi prints 40-hex commit

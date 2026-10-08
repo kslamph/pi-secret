@@ -150,7 +150,7 @@ describe("the rendered dialog through ctx.ui.custom", () => {
   }
   const renderPlain = (lines: string[]) => lines.join("\n");
   // The cursor is inverse-video on the first bullet, so it lands inside the run of bullets.
-  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b_[^\x07]*\x07/g, "");
 
   it("never renders the secret, only bullets and the length", async () => {
     const capture = harness();

@@ -2,7 +2,7 @@ import { MAX_REF_BYTES, envVarName, findEnvVarCollision, fingerprint, isValidNam
 import { maskPreview } from "./preview.ts";
 
 export type SecretTier = "session" | "ambient";
-export type SecretSource = "prompt" | "paste";
+export type SecretSource = "prompt" | "paste" | "file";
 
 export interface VaultEntry {
   name: string;
@@ -37,7 +37,7 @@ export interface PublicEntry {
 }
 
 interface InternalEntry extends Omit<VaultEntry, keyof PublicEntry> {
-  __piSecureSecret?: never;
+  __piSecretSecret?: never;
 }
 
 function toPublic(entry: VaultEntry): PublicEntry {
@@ -199,7 +199,7 @@ export function activeScopeKey(): string | undefined {
  * as one. (ruling I3)
  */
 export function activeVault(): Vault {
-  if (currentScope === undefined) throw new Error("pi-secure: no session scope bound (activeVault called before session_start)");
+  if (currentScope === undefined) throw new Error("pi-secret: no session scope bound (activeVault called before session_start)");
   return vaultForSession(currentScope);
 }
 
