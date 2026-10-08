@@ -366,3 +366,41 @@ describe("the three hooks pi would silently skip on a throw", () => {
     expect(JSON.stringify(out)).not.toContain(GH);
   });
 });
+
+/**
+ * Review 2026-10-08, finding I2: `/sec restore <name>` for a name that is not in the
+ * vault produced NO output at all. `restoreSecret` returns { ok:false, reason } for
+ * that case and only notifies on the success and clipboard-failure paths, and the
+ * dispatcher discarded the return value entirely. The failure mode is not cosmetic:
+ * a user who mistypes a name gets silence and may paste whatever was in the clipboard
+ * before — a stale secret, or something unrelated — believing it is the one they asked
+ * for. The unit test missed it because it asserts on restoreSecret's return value and
+ * never on what the dispatcher does with it.
+ */
+describe("/sec restore must never fail silently", () => {
+  it("warns when the name is not in this session", async () => {
+    const notify = vi.fn();
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    await runSecCommand("restore gh_typo", vault, { ui: { notify } } as never);
+    expect(notify).toHaveBeenCalled();
+    const [message, level] = notify.mock.calls.at(-1)! as [string, string];
+    expect(message).toMatch(/gh_typo/);
+    expect(level).toBe("warning");
+    expect(message).not.toContain(GH);
+  });
+
+  it("still reports success on the clipboard path without gaining an editor channel", async () => {
+    // The pin that matters most: fixing the silent failure must not tempt anyone to
+    // route the value somewhere visible. The dispatcher must not notify a value, and
+    // RestoreIo still has no editor channel to add one.
+    const notify = vi.fn();
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    await runSecCommand("restore gh_pat", vault, { ui: { notify } } as never);
+    for (const call of notify.mock.calls) {
+      expect(String(call[0])).not.toContain(GH);
+    }
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("clipboard"), "info");
+  });
+});

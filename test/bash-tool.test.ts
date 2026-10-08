@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { bashIsOwnedByPiSecure, createSecureBashToolDefinition } from "../src/tools/bash.ts";
 import { Vault } from "../src/vault.ts";
+import { setEnabled } from "../src/state.ts";
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
 
@@ -135,5 +136,59 @@ describe("secure bash tool definition", () => {
     const joined = updates.join("\n");
     expect(joined).toContain("{{sec:gh_pat}}");
     expect(joined).not.toContain(GH);
+  });
+});
+
+/**
+ * Review 2026-10-08, finding I1: `/sec off` told the user "refs will not expand",
+ * and stopped expansion for every tool EXCEPT bash — bash is injected by the
+ * spawnHook, which never consulted the enabled flag. So the single most
+ * security-relevant injection path kept working after the user switched the whole
+ * mechanism off, and the UI said otherwise.
+ *
+ * The fix must not merely stop substituting: a command containing a literal
+ * `{{sec:NAME}}` would then run and report success, which is the false-confidence
+ * class this project treats as its worst failure mode (`curl -H "Bearer
+ * {{sec:gh}}"` would send a bogus header and look like it worked). So a ref while
+ * disabled BLOCKS with a reason instead.
+ */
+describe("/sec off must actually stop bash ref injection", () => {
+  afterEach(() => setEnabled(true));
+
+  it("blocks a ref in bash while pi-secure is disabled", async () => {
+    setEnabled(false);
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    const def = createSecureBashToolDefinition(process.cwd(), { vault: () => vault });
+    await expect(
+      def.execute("d1", { command: 'printf %s "{{sec:gh_pat}}"' }, undefined, undefined, EXEC_CTX),
+    ).rejects.toThrow(/disabled/i);
+  });
+
+  it("still runs ordinary commands while disabled", async () => {
+    setEnabled(false);
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    const def = createSecureBashToolDefinition(process.cwd(), { vault: () => vault });
+    const result = await def.execute("d2", { command: "printf ok" }, undefined, undefined, EXEC_CTX);
+    const text = (result.content as Array<{ text: string }>).map((c) => c.text).join("");
+    expect(text).toContain("ok");
+  });
+
+  it("expands again after /sec on", async () => {
+    setEnabled(false);
+    setEnabled(true);
+    const vault = new Vault("t");
+    vault.add("gh_pat", GH, "prompt");
+    const def = createSecureBashToolDefinition(process.cwd(), { vault: () => vault });
+    const result = await def.execute(
+      "d3",
+      { command: 'printf "<%s>" "{{sec:gh_pat}}"' },
+      undefined,
+      undefined,
+      EXEC_CTX,
+    );
+    const text = (result.content as Array<{ text: string }>).map((c) => c.text).join("");
+    expect(text.trim()).toBe(`<${GH}>`);
   });
 });

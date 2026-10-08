@@ -125,10 +125,15 @@ export async function runSecCommand(
         import("./restore.ts"),
         import("@earendil-works/pi-coding-agent"),
       ]);
-      await restoreSecret(arg, vault, {
+      // The RESULT is the user's only feedback. restoreSecret returns { ok:false,
+      // reason } without notifying when the name is unknown, and discarding it made
+      // `/sec restore <typo>` completely silent — the user would then paste whatever
+      // was already on the clipboard and believe it was the secret they asked for.
+      const outcome = await restoreSecret(arg, vault, {
         copy: copyToClipboard,
         notify: (message, level) => ctx.ui.notify(message, level),
       });
+      if (!outcome.ok && outcome.reason) ctx.ui.notify(outcome.reason, "warning");
       return;
     }
 

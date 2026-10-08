@@ -2,6 +2,7 @@ import { createBashToolDefinition, type ExtensionAPI, type ToolDefinition } from
 import type { Vault } from "../vault.ts";
 import { injectBashCommand } from "../glue.ts";
 import { scrubText } from "../scrub.ts";
+import { isEnabled } from "../state.ts";
 
 type BashDef = ReturnType<typeof createBashToolDefinition>;
 type ExecuteFn = BashDef["execute"];
@@ -54,6 +55,18 @@ export function createSecureBashToolDefinition(cwd: string, options: SecureBashO
     // parallel bash children never see each other's secrets, and process.env is
     // never touched.
     spawnHook: (spawnCtx) => {
+      // `/sec off` says "refs will not expand". Bash is the one injection path that
+      // never goes through the isEnabled()-gated `tool_call` hook, so without this
+      // check the whole mechanism kept working after the user switched it off —
+      // for the single path that matters most. Blocking is deliberate: silently
+      // skipping substitution would run `curl -H "Bearer {{sec:gh}}"` and report
+      // success, and a literal placeholder read back as a working credential is the
+      // false-confidence class this design treats as its worst failure.
+      if (!isEnabled() && /\{\{sec:[a-z][a-z0-9_-]{0,63}\}\}/.test(spawnCtx.command)) {
+        throw new Error(
+          "pi-secure is disabled for this session, so {{sec:…}} refs are not expanded. Run /sec on to re-enable them.",
+        );
+      }
       const expansion = injectBashCommand(spawnCtx.command, options.vault());
       // A non-empty `block` means at least one ref was NOT substituted, so the
       // command would run with a literal `{{sec:…}}` in it. Throw rather than
