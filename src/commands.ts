@@ -230,6 +230,11 @@ async function entryMenuLoop(
       d: { kind: "remove", name },
     });
     if (!choice || choice.kind === "back") return;
+    if (!vault.has(name)) {
+      // The entry can disappear while this menu is open — `/sec off` clears the vault from the
+      // same UI. Offering rename/remove for something that is gone is worse than returning.
+      return;
+    }
     if (choice.kind === "copy") {
       await runSecCommand(`restore ${name}`, vault, ctx);
       continue;
@@ -247,12 +252,15 @@ async function entryMenuLoop(
       } catch {
         /* runSecCommand already reported it */
       }
+      // Also back to the list: the title of this menu is the OLD name, which no longer resolves.
       return;
     }
     if (choice.kind === "remove") {
       const ok = await ctx.ui.confirm("Remove secret", `Remove sec:${name} from this session?`);
       if (ok) await runSecCommand(`remove ${name}`, vault, ctx);
-      continue;
+      // Back to the LIST, not to this entry's menu: the entry is gone now, so staying here
+      // would leave the user staring at actions for a secret that no longer exists.
+      return;
     }
   }
 }

@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 
 export interface MaskState {
   buf: string;
@@ -37,6 +38,26 @@ export function applyInput(state: MaskState, data: string): MaskState {
   // distinguishable from a sequence we merely do not model. F-keys and charset
   // selectors arrive ESC-prefixed but are not CSI; treating any leftover ESC as
   // "cancel" silently discards a half-typed secret, which is the worst failure
+  // Keys are decoded with pi-tui's own matcher FIRST, exactly as pi's components do.
+  //
+  // This used to be raw byte surgery, and that was wrong in a way a user hit immediately: pi
+  // negotiates the kitty keyboard protocol when the terminal supports it, and then a keypress
+  // arrives as a CSI-u sequence rather than a bare byte — ESC as `\x1b[27u`, Ctrl+C as
+  // `\x1b[99;5u`, Enter as `\x1b[13u`. The old checks missed every one of them and the byte
+  // loop then APPENDED the digits to the buffer, so "esc to cancel" did not cancel and Ctrl+C
+  // typed characters into the secret. `matchesKey` handles both encodings, and is the library's
+  // canonical path rather than a reimplementation of it.
+  if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.ctrl("d"))) {
+    return { buf: "", cursor: 0, status: "cancel" };
+  }
+  if (matchesKey(data, Key.return)) {
+    return { buf, cursor: buf.length, status: "submit" };
+  }
+  if (matchesKey(data, Key.backspace)) {
+    buf = buf.slice(0, -1);
+    return { buf, cursor: buf.length, status: "editing" };
+  }
+
   // available here: the user concludes nothing was stored and may paste the token
   // somewhere unprotected instead.
   const cleaned = stripNoise(data);
@@ -67,7 +88,9 @@ export function renderMasked(state: MaskState, title: string, width: number): st
   return [
     title.slice(0, width),
     clipped || " ".repeat(1),
-    `len ${state.buf.length} · enter to store · esc to cancel`.slice(0, width),
+    // The hint must be true for the terminal the user is actually on. Kitty-protocol
+    // terminals send ESC as `\x1b[27u`, which is exactly the case the old hint got wrong.
+    `len ${state.buf.length} · enter to store · esc or ctrl+c to cancel`.slice(0, width),
   ];
 }
 
@@ -76,6 +99,10 @@ export async function promptMaskedSecret(
   title: string,
 ): Promise<string | undefined> {
   if (ctx.mode !== "tui" || !ctx.hasUI) return undefined;
+  // `overlay: true` puts this in the same visual family as the built-in dialogs (pi's
+  // `ctx.ui.input` for the name, `select`, `confirm`). Without it the component is dropped
+  // INTO the editor container, so the two halves of one flow — name, then value — looked like
+  // two unrelated pieces of software.
   const result = await ctx.ui.custom<{ value?: string }>((_tui, theme, _kb, done) => {
     let state = emptyMaskState();
     let dirty = true;
@@ -102,7 +129,7 @@ export async function promptMaskedSecret(
         state = { buf: "", cursor: 0, status: "cancel" };
       },
     };
-  });
+  }, { overlay: true });
   const value = result?.value;
   return value && value.trim() ? value : undefined;
 }

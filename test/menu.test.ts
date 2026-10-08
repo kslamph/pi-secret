@@ -208,3 +208,64 @@ describe("driving the list", () => {
     for (const line of rendered) expect(line.length).toBeLessThanOrEqual(80);
   });
 });
+/**
+ * Reported from the field: after removing a secret the menu stayed on that secret's action
+ * page — offering "Rename" and "Remove" for something that no longer exists. The entry sub-menu
+ * now always hands control back to the list once it has changed or deleted the entry.
+ */
+describe("leaving an entry menu", () => {
+  it("returns to the list after a removal, and after a rename", async () => {
+    // The behaviour under test is the RETURN, so it is driven through the real command loop:
+    // the sub-menu must not re-open the entry it just changed.
+    const vault = new Vault("menu-loop");
+    vault.add("gh_pat", GH, "prompt");
+    const removed: string[] = [];
+    const ctx = {
+      mode: "tui" as const,
+      hasUI: true,
+      ui: {
+        notify: vi.fn(),
+        input: vi.fn(),
+        confirm: vi.fn(async () => true),
+        // First panel: pick the entry. Second: pick Remove. Third: must be the LIST, and
+        // answering "no" there ends the loop instead of proving anything.
+        custom: vi.fn(),
+      },
+    };
+    const script = [
+      { kind: "entry", name: "gh_pat" } as const,
+      { kind: "remove", name: "gh_pat" } as const,
+      null,
+    ];
+    ctx.ui.custom = vi.fn(async () => script.shift() ?? null) as never;
+    const { runSecMenu } = await import("../src/commands.ts");
+    await runSecMenu(ctx as never, vault);
+    removed.push(...vault.names());
+    expect(removed).toEqual([]);
+    // two panels were drawn: the entry menu and the list again — not a third entry menu.
+    expect(ctx.ui.custom).toHaveBeenCalledTimes(3);
+  });
+
+  it("refuses to keep showing an entry menu for something that is already gone", async () => {
+    const vault = new Vault("menu-vanished");
+    const ctx = {
+      mode: "tui" as const,
+      hasUI: true,
+      ui: { notify: vi.fn(), input: vi.fn(), confirm: vi.fn(), custom: vi.fn() },
+    };
+    // The entry disappears between the list and the sub-menu (another tab ran `/sec off`).
+    const script = [
+      { kind: "entry", name: "gh_pat" } as const,
+      { kind: "remove", name: "gh_pat" } as const,
+      null,
+    ];
+    let i = 0;
+    ctx.ui.custom = vi.fn(async () => script[i++] ?? null) as never;
+    const { runSecMenu } = await import("../src/commands.ts");
+    await runSecMenu(ctx as never, vault);
+    // Three panels: the list, the entry's actions, and the list again. The guard means the
+    // action page is drawn ONCE — without it the menu would offer rename/remove for a name
+    // that is not in the vault, which is how a user ends up staring at a secret that is gone.
+    expect(ctx.ui.custom).toHaveBeenCalledTimes(3);
+  });
+});

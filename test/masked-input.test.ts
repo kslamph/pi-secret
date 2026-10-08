@@ -92,3 +92,60 @@ describe("escape handling (regression: a half-typed secret must not be discarded
     expect(feed("abc", "\x1b").status).toBe("cancel");
   });
 });
+
+/**
+ * Reported from the field: "esc to cancel" did not cancel, and Ctrl+C typed characters into
+ * the secret instead. Both were the same root cause, and neither was visible in the unit tests
+ * because they only ever fed RAW bytes.
+ *
+ * pi negotiates the kitty keyboard protocol when the terminal supports it, and then keypresses
+ * arrive as CSI-u sequences: ESC as `[27u`, Ctrl+C as `[99;5u`, Enter as `[13u`.
+ * The old raw-byte checks missed all of them, and the character loop then appended the digits
+ * to the buffer — so "esc" inserted "27" and Ctrl+C inserted "99;5u".
+ */
+describe("keys as they actually arrive in a kitty-protocol terminal", () => {
+  const KITTY = {
+    escape: "[27u",
+    ctrlC: "[99;5u",
+    enter: "[13u",
+    backspace: "[127u",
+  };
+
+  it("cancels on kitty-protocol escape", () => {
+    expect(applyInput(emptyMaskState(), KITTY.escape).status).toBe("cancel");
+  });
+
+  it("cancels on kitty-protocol ctrl+c", () => {
+    const state = applyInput(emptyMaskState(), "ghp_secret");
+    expect(state.buf).toBe("ghp_secret");
+    const out = applyInput(state, KITTY.ctrlC);
+    expect(out.status).toBe("cancel");
+    expect(out.buf).toBe("");
+  });
+
+  it("submits on kitty-protocol enter", () => {
+    const state = applyInput(emptyMaskState(), "ghp_secret");
+    const out = applyInput(state, KITTY.enter);
+    expect(out.status).toBe("submit");
+    expect(out.buf).toBe("ghp_secret");
+  });
+
+  it("still handles raw bytes, because the protocol is negotiated per terminal", () => {
+    expect(applyInput(emptyMaskState(), "\x1b").status).toBe("cancel");
+    expect(applyInput(emptyMaskState(), "\x03").status).toBe("cancel");
+    expect(applyInput(emptyMaskState(), "ghp_x\r").status).toBe("submit");
+  });
+
+  it("never lets a cancel key leave residue in the buffer", () => {
+    for (const key of [KITTY.escape, KITTY.ctrlC, "\x1b", "\x03"]) {
+      const out = applyInput({ buf: "partial_secret", cursor: 14, status: "editing" }, key);
+      expect(out.buf, JSON.stringify(key)).toBe("");
+      expect(out.status).toBe("cancel");
+    }
+  });
+
+  it("states both cancel keys in the footer, so the promise matches the terminal", () => {
+    const footer = renderMasked(emptyMaskState(), "t", 80)[2]!;
+    expect(footer).toMatch(/esc or ctrl\+c to cancel/);
+  });
+});

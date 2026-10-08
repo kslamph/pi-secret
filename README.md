@@ -63,7 +63,9 @@ Enter on a secret opens what you can do with it:
 | Back | `esc` | |
 
 `Add a secret…` asks for a name, then shows the masked prompt where every character renders as
-`•`; the length and preview are shown on confirm. `Turn pi-secure off` (`t`) stops ref injection
+`•`; the length and preview are shown on confirm. `enter` stores it, `esc` or `ctrl+c` cancels —
+the prompt is a normal pi overlay dialog, so it looks and behaves like the name step and the
+menus above it. `Turn pi-secure off` (`t`) stops ref injection
 and capture and **clears the values**; turning it back on re-enables the mechanism but does not
 restore them, so anything added while it was off says so when it is stored.
 
