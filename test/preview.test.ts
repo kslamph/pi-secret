@@ -16,8 +16,8 @@ describe("the masked preview", () => {
     // The whole marker is shown (`sk-ant-api03-`) because that is format, not secret; the
     // value itself still gives up only 4+4.
     expect(maskPreview("sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345")).toBe("sk-ant-api03-abcd…2345");
-    // 42 chars -> 4 per side, prefix kept whole.
-    expect(maskPreview("xoxb-EXAMPLE-NOT-A-REAL-SLACK-TOKEN")).toBe("xoxb-1234…uvwx");
+    // 35 chars -> 4 per side, prefix kept whole.
+    expect(maskPreview("xoxb-EXAMPLE-NOT-A-REAL-SLACK-TOKEN")).toBe("xoxb-EXAM…OKEN");
   });
 
   it("falls back to plain head/tail when there is no prefix to keep", () => {
