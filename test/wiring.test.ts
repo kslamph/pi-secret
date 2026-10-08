@@ -304,3 +304,65 @@ describe("message_end — the model's own message is persisted before any tool r
     expect(await h.fire("message_end", { message }, ctx)).toBeUndefined();
   });
 });
+
+// --- Review 2026-10-08, finding C1 (the three unguarded hooks) --------------------
+// pi's ExtensionRunner swallows a throwing handler and returns the value it held
+// BEFORE the handler ran (runner.js: emitMessageEnd / emitContext /
+// emitBeforeProviderRequest each try/catch per handler and keep `current*`). For
+// these three hooks an exception therefore does not crash the turn — it silently
+// skips scrubbing on the persisted assistant message and on the bytes sent to the
+// provider. A vault whose `values()` throws is the cheapest faithful way to make
+// the scrubber throw from inside the hook.
+describe("the three hooks pi would silently skip on a throw", () => {
+  it("message_end redacts rather than returning the untouched message", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
+    // Make the live session vault's value enumeration throw.
+    const live = vaultForSession("/tmp/s.jsonl");
+    Object.defineProperty(live, "values", {
+      value: () => { throw new RangeError("simulated scrubber failure"); },
+      configurable: true,
+    });
+    const out = (await h.fire("message_end", { message: { role: "assistant", content: `deployed ${GH}` } }, ctx)) as {
+      message: { content: string };
+    };
+    expect(out).toBeDefined();
+    expect(JSON.stringify(out)).not.toContain(GH);
+    expect(JSON.stringify(out)).toContain("{{sec:redacted}}");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("failed closed"), "error");
+  });
+
+  it("before_provider_request redacts rather than returning the untouched payload", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    const live = vaultForSession("/tmp/s.jsonl");
+    live.add("gh_pat", GH, "prompt");
+    Object.defineProperty(live, "values", {
+      value: () => { throw new RangeError("simulated scrubber failure"); },
+      configurable: true,
+    });
+    const out = await h.fire("before_provider_request", { payload: { messages: [{ role: "user", content: GH }] }, model: {}, options: {} }, ctx);
+    expect(out).toBeDefined();
+    expect(JSON.stringify(out)).not.toContain(GH);
+  });
+
+  it("context redacts rather than returning the untouched messages", async () => {
+    const h = harness();
+    piSecure(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    const live = vaultForSession("/tmp/s.jsonl");
+    live.add("gh_pat", GH, "prompt");
+    Object.defineProperty(live, "values", {
+      value: () => { throw new RangeError("simulated scrubber failure"); },
+      configurable: true,
+    });
+    const out = (await h.fire("context", { messages: [{ role: "user", content: GH }] }, ctx)) as {
+      messages: Array<{ content: string }>;
+    };
+    expect(out).toBeDefined();
+    expect(JSON.stringify(out)).not.toContain(GH);
+  });
+});

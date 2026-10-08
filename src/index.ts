@@ -1,9 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { dropSessionVault, setActiveScopeKey, vaultForSession, type Vault } from "./vault.ts";
-import { captureFromText, injectToolCall, scrubOutputSnapshot, scrubToolResult } from "./glue.ts";
+import { captureFromText, injectToolCall, scrubDeepFailClosed, scrubOutputSnapshot, scrubToolResult } from "./glue.ts";
 import { bashIsOwnedByPiSecure, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
-import { scrubDeep } from "./scrub.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
 import { isEnabled } from "./state.ts";
 import { registerCommands } from "./commands.ts";
@@ -138,7 +137,9 @@ export default function piSecure(pi: ExtensionAPI): void {
 
   pi.on("context", async (event, ctx) => {
     if (!isEnabled()) return undefined;
-    const out = scrubDeep(event.messages as unknown, vault(ctx), { shapes: true });
+    const out = scrubDeepFailClosed(event.messages as unknown, vault(ctx), { shapes: true }, (cls) =>
+      ctx.ui.notify(`pi-secure: context scrub failed closed (${cls})`, "error"),
+    );
     return out.hits ? { messages: out.value as never } : undefined;
   });
 
@@ -160,14 +161,18 @@ export default function piSecure(pi: ExtensionAPI): void {
    */
   pi.on("message_end", (event, ctx) => {
     if (!isEnabled()) return undefined;
-    const out = scrubDeep(event.message as unknown, vault(ctx), { shapes: true });
+    const out = scrubDeepFailClosed(event.message as unknown, vault(ctx), { shapes: true }, (cls) =>
+      ctx.ui.notify(`pi-secure: message scrub failed closed (${cls})`, "error"),
+    );
     return out.hits ? { message: out.value as never } : undefined;
   });
 
   pi.on("before_provider_request", (event, ctx) => {
     if (!isEnabled()) return undefined;
     // Last mile: the bytes actually leaving the machine.
-    const out = scrubDeep(event.payload as unknown, vault(ctx), { shapes: true });
+    const out = scrubDeepFailClosed(event.payload as unknown, vault(ctx), { shapes: true }, (cls) =>
+      ctx.ui.notify(`pi-secure: provider payload scrub failed closed (${cls})`, "error"),
+    );
     return out.hits ? (out.value as never) : undefined;
   });
 

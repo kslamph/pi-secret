@@ -1,7 +1,7 @@
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Vault } from "./vault.ts";
 import { bashRefIssues, expandBash, expandRefs, findRefs } from "./substitute.ts";
-import { scrubDeep, scrubText } from "./scrub.ts";
+import { redactAllText, scrubDeep, scrubText } from "./scrub.ts";
 import { applyCapture, findCandidates, suggestNames, type CapturedItem } from "./capture.ts";
 
 import { MIN_SCRUBABLE_LENGTH } from "./refs.ts";
@@ -191,6 +191,39 @@ export function scrubMessageText(text: string, vault: Vault, opts: { shapes: boo
     return scrubText(text, vault, opts).text;
   } catch {
     return "{{sec:redacted}}";
+  }
+}
+
+/**
+ * scrubDeep with the §11 fail-closed fallback, for the hooks that guard the two
+ * surfaces pi hands back UNCHANGED when a handler throws.
+ *
+ * Why this wrapper exists: `emitMessageEnd`, `emitContext` and
+ * `emitBeforeProviderRequest` in pi's ExtensionRunner each wrap every handler in
+ * try/catch, call `emitError`, and return the value they held before the failing
+ * handler ran. So for those three hooks an exception is not a crash — it is a silent
+ * skip of scrubbing, on the persisted assistant message and on the exact bytes sent
+ * to the provider. `scrubToolResult` was already guarded; these were not, which is
+ * the asymmetry a 2026-10-08 review found.
+ *
+ * The fallback over-redacts (every string becomes the marker). That is the intended
+ * asymmetry: losing the model's context costs a turn, leaking the credential costs
+ * the user. `onError` gets the error CLASS only — never its message — because a
+ * thrown message can carry the very text that failed to scrub.
+ */
+export function scrubDeepFailClosed<T>(
+  value: T,
+  vault: Vault,
+  opts: { shapes: boolean },
+  onError?: (errorClass: string) => void,
+): { value: T; hits: number } {
+  try {
+    return scrubDeep(value, vault, opts);
+  } catch (error) {
+    onError?.(
+      error instanceof Error ? error.constructor.name : typeof error,
+    );
+    return { value: redactAllText(value), hits: 1 };
   }
 }
 

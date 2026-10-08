@@ -412,3 +412,49 @@ describe("Task 16 — the stop rule: over-masking is worse than the gap", () => 
     expect(out.text).toBe("{{sec:redacted}} and then some prose here");
   });
 });
+
+// --- Review 2026-10-08, finding C1 -------------------------------------------------
+// pi's ExtensionRunner catches a throwing handler and continues with the value it
+// held BEFORE the handler ran (verified in
+// pi-coding-agent/dist/core/extensions/runner.js: emitMessageEnd / emitContext /
+// emitBeforeProviderRequest each wrap handlers in try/catch and keep `current*`).
+// So a RangeError inside scrubDeep is not a crash — it is scrubbing silently
+// skipped on the two surfaces that must never fail open: the persisted assistant
+// message and the bytes handed to the provider.
+describe("scrubDeep must not fail open on deep nesting", () => {
+  const deep = (depth: number, leaf: unknown): unknown => {
+    let node: unknown = leaf;
+    for (let i = 0; i < depth; i++) node = { nested: node };
+    return node;
+  };
+
+  it("scrubs a value nested far past the old recursive depth limit", () => {
+    // The recursive walk died at ~5000 with RangeError: Maximum call stack size
+    // exceeded. A model can emit a tool-call argument this deep, so this is
+    // reachable input, not a synthetic one.
+    expect(() => scrubDeep(deep(20_000, "leaf"), vault)).not.toThrow();
+  });
+
+  it("still masks a secret at the bottom of that nesting", () => {
+    const out = scrubDeep(deep(20_000, `token=${GH}`), vault, { shapes: true });
+    // Descend iteratively rather than JSON.stringify: stringifying 20k-deep is
+    // itself recursive and throws — the same trap, in the assertion.
+    let node: unknown = out.value;
+    for (let i = 0; i < 20_000; i++) node = (node as { nested: unknown }).nested;
+    expect(node).toBe("token={{sec:gh_pat}}");
+    expect(out.hits).toBeGreaterThan(0);
+  });
+
+  it("keeps arrays, sibling keys and non-string leaves intact", () => {
+    const out = scrubDeep(
+      { list: [1, "two", { deep: GH }], flag: false, nil: null, when: 42 },
+      vault,
+    );
+    expect(out.value).toEqual({
+      list: [1, "two", { deep: "{{sec:gh_pat}}" }],
+      flag: false,
+      nil: null,
+      when: 42,
+    });
+  });
+});

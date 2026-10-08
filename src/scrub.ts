@@ -391,21 +391,84 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
   return { text: out, hits };
 }
 
+/**
+ * One iterative deep-walk shared by scrubDeep and redactAllText.
+ *
+ * EXPLICIT STACK, NOT RECURSION, and that is load-bearing rather than stylistic. The
+ * recursive version died at ~5000 levels with `RangeError: Maximum call stack size
+ * exceeded` (measured, not theoretical — a model can emit a tool-call argument nested
+ * that deep). A throw inside a pi extension handler is NOT a crash: every one of
+ * `emitMessageEnd`, `emitContext` and `emitBeforeProviderRequest` wraps each handler
+ * in try/catch, calls `emitError`, and returns the value it held BEFORE the failing
+ * handler ran. So the stack overflow was scrubbing being silently skipped on exactly
+ * the two surfaces this design forbids from failing open — the persisted assistant
+ * message and the bytes handed to the provider. An unbounded-depth walk turns that
+ * class of bug from "impossible" into "reachable".
+ *
+ * Shallow-copies each container so the caller's object graph is never mutated, and
+ * preserves non-string leaves and key order exactly as the recursive version did.
+ */
+function walkDeep<T>(value: T, onString: (s: string) => string, onHit?: () => void): T {
+  const isContainer = (n: unknown): n is Record<string, unknown> | unknown[] =>
+    Array.isArray(n) || (n !== null && typeof n === "object");
+  const clone = (n: Record<string, unknown> | unknown[]): Record<string, unknown> | unknown[] =>
+    Array.isArray(n) ? n.slice() : { ...n };
+  const keysOf = (n: Record<string, unknown> | unknown[]): string[] =>
+    Array.isArray(n) ? n.map((_, i) => String(i)) : Object.keys(n);
+
+  if (!isContainer(value)) {
+    if (typeof value === "string") return onString(value) as T;
+    return value;
+  }
+
+  const out = clone(value);
+  const stack: { src: Record<string, unknown> | unknown[]; dst: Record<string, unknown> | unknown[]; keys: string[]; i: number }[] = [
+    { src: value, dst: out, keys: keysOf(value), i: 0 },
+  ];
+  while (stack.length) {
+    const frame = stack[stack.length - 1]!;
+    if (frame.i >= frame.keys.length) {
+      stack.pop();
+      continue;
+    }
+    const key = frame.keys[frame.i++]!;
+    const child = (frame.src as Record<string, unknown>)[key];
+    if (typeof child === "string") {
+      (frame.dst as Record<string, unknown>)[key] = onString(child);
+    } else if (isContainer(child)) {
+      const copy = clone(child);
+      (frame.dst as Record<string, unknown>)[key] = copy;
+      stack.push({ src: child, dst: copy, keys: keysOf(child), i: 0 });
+    }
+    // Non-string, non-container leaves were already carried over by the shallow
+    // clone; nothing to visit.
+  }
+  onHit?.();
+  return out as T;
+}
+
 export function scrubDeep<T>(value: T, vault: SecretProvider, opts?: ScrubOptions): { value: T; hits: number } {
   let hits = 0;
-  const walk = (node: unknown): unknown => {
-    if (typeof node === "string") {
-      const r = scrubText(node, vault, opts);
+  const scrubbed = walkDeep(
+    value,
+    (s) => {
+      const r = scrubText(s, vault, opts);
       hits += r.hits;
       return r.text;
-    }
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === "object") {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(node)) out[k] = walk(v);
-      return out;
-    }
-    return node;
-  };
-  return { value: walk(value) as T, hits };
+    },
+    () => {
+      /* hits accumulates in the closure above */
+    },
+  );
+  return { value: scrubbed, hits };
+}
+
+/**
+ * The fail-closed fallback (spec §11): replace EVERY string leaf with the redaction
+ * marker, using the same unbounded-depth walk so it cannot itself throw. Used when
+ * scrubDeep raises — over-redacting costs the model some context, under-redacting
+ * costs the user the credential, so the bias is deliberate and one-directional.
+ */
+export function redactAllText<T>(value: T): T {
+  return walkDeep(value, () => GENERIC);
 }
