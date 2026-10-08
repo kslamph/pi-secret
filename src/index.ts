@@ -16,7 +16,7 @@ import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } f
 import { isEnabled } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.2.0";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes
