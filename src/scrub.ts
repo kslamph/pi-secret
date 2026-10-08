@@ -1,5 +1,5 @@
 import { MIN_SCRUBABLE_LENGTH, derivedForms } from "./refs.ts";
-import { isDigestShaped } from "./entropy.ts";
+import { PROVIDER_PREFIX_SOURCES, isDigestShaped } from "./entropy.ts";
 
 export interface SecretProvider {
   values(): string[];
@@ -49,21 +49,7 @@ const GENERIC = "{{sec:redacted}}";
  * is no `x` (verbose) flag in this V8 to make the readable form work:
  * `new RegExp(src, "gx")` throws SyntaxError at module load.
  */
-const PREFIX_SOURCES = [
-  "dckr_pat_[A-Za-z0-9_\\-]{20,}",
-  "github_pat_[A-Za-z0-9_]{20,}",
-  "gh[pousr]_[A-Za-z0-9]{20,}",
-  "sk-ant-[A-Za-z0-9_\\-]{20,}",
-  "sk-[A-Za-z0-9]{20,}",
-  "AIza[0-9A-Za-z_\\-]{30,}",
-  "(?:AKIA|ASIA)[0-9A-Z]{16}",
-  "xox[baprs]-[A-Za-z0-9\\-]{10,}",
-  "glpat-[A-Za-z0-9_\\-]{20,}",
-  "npm_[A-Za-z0-9]{30,}",
-  "pypi-Po-[A-Za-z0-9]{20,}",
-  "hf_[A-Za-z0-9]{20,}",
-];
-const PREFIX_RE = `(?:${PREFIX_SOURCES.join("|")})`;
+const PREFIX_RE = `(?:${PROVIDER_PREFIX_SOURCES.join("|")})`;
 
 const PEM_RE = String.raw`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----`;
 const JWT_RE = String.raw`eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{8,}`;

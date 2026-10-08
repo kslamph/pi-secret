@@ -15,6 +15,43 @@
  * exempt, and both the scrubber and the capture detector have to agree on that.
  */
 
+/**
+ * Anchored provider formats, most specific prefix first so `dckr_pat_` wins over
+ * `pat_`-like forms and `sk-ant-` wins over `sk-`.
+ *
+ * This table lives here, not in scrub.ts, because it answers a question BOTH sides need:
+ * the scrubber uses it to decide what to mask, and the preview uses it to decide what may
+ * be shown. Two copies of "what does a credential look like" is exactly the drift this
+ * project keeps paying for.
+ *
+ * Built as an array of single-line sources joined with `|`, and NOT as a multi-line
+ * String.raw template: a template literal there embeds real newlines and indentation into
+ * the pattern, so `(?:\n  dckr_pat_…` would demand a newline before every token and match
+ * nothing — a silent, total failure of shape scrubbing. There is no `x` (verbose) flag in
+ * this V8 to make the readable form work: `new RegExp(src, "gx")` throws SyntaxError at
+ * module load.
+ */
+export const PROVIDER_PREFIX_SOURCES = [
+  "dckr_pat_[A-Za-z0-9_\\-]{20,}",
+  "github_pat_[A-Za-z0-9_]{20,}",
+  "gh[pousr]_[A-Za-z0-9]{20,}",
+  "sk-ant-[A-Za-z0-9_\\-]{20,}",
+  "sk-[A-Za-z0-9]{20,}",
+  "AIza[0-9A-Za-z_\\-]{30,}",
+  "(?:AKIA|ASIA)[0-9A-Z]{16}",
+  "xox[baprs]-[A-Za-z0-9\\-]{10,}",
+  "glpat-[A-Za-z0-9_\\-]{20,}",
+  "npm_[A-Za-z0-9]{30,}",
+  "pypi-Po-[A-Za-z0-9]{20,}",
+  "hf_[A-Za-z0-9]{20,}",
+];
+
+/** The whole value matches a known provider key format. Anchored, never a substring test. */
+const PROVIDER_FORMAT_ANCHORED = new RegExp(`^(?:${PROVIDER_PREFIX_SOURCES.join("|")})$`);
+export function matchesProviderFormat(value: string): boolean {
+  return PROVIDER_FORMAT_ANCHORED.test(value);
+}
+
 /** Shapes that are digests, not credentials. Anchored: only the WHOLE candidate counts. */
 const DIGEST_SHAPED = [
   "[0-9a-f]{40}", // git SHA-1

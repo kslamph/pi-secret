@@ -29,7 +29,10 @@ export async function restoreSecret(
     io.notify(`could not restore sec:${name} to the clipboard`, "error");
     return { ok: false, reason };
   }
-  io.notify(`sec:${name} is on your clipboard · len ${entry.length} · sha256:${entry.fingerprint}`, "info");
+  io.notify(
+    `sec:${name} (${entry.preview ?? `sha256:${entry.fingerprint}`}) is on your clipboard · len ${entry.length}`,
+    "info",
+  );
   io.notify("the value was not placed in the editor — typing it there would persist it", "warning");
   return { ok: true };
 }

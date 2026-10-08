@@ -5,6 +5,7 @@ export interface ReceiptItem {
   name: string;
   length: number;
   fingerprint: string;
+  label: string;
   source: "prompt" | "paste";
 }
 
@@ -15,7 +16,9 @@ export interface Receipt {
 /**
  * Custom entries do not participate in LLM context, so a receipt is the one place
  * a capture can be recorded without putting anything sensitive in front of the
- * model. It is value-free by construction: name, length, fingerprint only.
+ * model. It carries name, length and a LABEL — a truncated, value-derived preview like
+ * `ghp_A1b2…Q7R8`, which is what lets a person recognise the key they just pasted without
+ * reading it out. Nothing here ever carries the value itself.
  */
 export const RECEIPT_TYPE = "pi-secure-receipt";
 
@@ -25,7 +28,7 @@ export function buildReceiptComponent(receipt: Receipt, theme: Theme): Component
     box.addChild(
       new Text(
         `${theme.fg("accent", "captured")} ${theme.fg("toolTitle", `sec:${c.name}`)} · ` +
-          theme.fg("dim", `len ${c.length} · sha256:${c.fingerprint} · this session only`),
+          theme.fg("dim", `${c.label} · len ${c.length} · this session only`),
         0,
         0,
       ),

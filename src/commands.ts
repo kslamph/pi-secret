@@ -3,6 +3,11 @@ import { activeVault, dropActiveVault, type Vault } from "./vault.ts";
 import { isValidName } from "./refs.ts";
 import { promptMaskedSecret } from "./masked-input.ts";
 import { setEnabled } from "./state.ts";
+import { secretLabel } from "./preview.ts";
+import type { PublicEntry } from "./vault.ts";
+
+/** The public entry carries its own preview; short values fall back to the digest. */
+const labelOf = (e: PublicEntry): string => e.preview ?? `sha256:${e.fingerprint}`;
 
 const SEC_USAGE = "usage: /sec add|list|remove|rename|test|restore|off|on [name]";
 
@@ -47,7 +52,7 @@ export async function runSecCommand(
       ctx.ui.notify(
         entries.length
           ? entries
-              .map((e) => `sec:${e.name} · len ${e.length} · sha256:${e.fingerprint} · ${e.source}`)
+              .map((e) => `sec:${e.name} · ${labelOf(e)} · len ${e.length} · ${e.source}`)
               .join("\n")
           : "no secrets in this session",
         "info",
@@ -71,7 +76,7 @@ export async function runSecCommand(
       try {
         const entry = vault.add(arg, value, "prompt");
         ctx.ui.notify(
-          `captured sec:${entry.name} · len ${entry.length} · sha256:${entry.fingerprint} · this session only`,
+          `captured sec:${entry.name} · ${labelOf(entry)} · len ${entry.length} · this session only`,
           "info",
         );
       } catch (error) {
@@ -109,11 +114,11 @@ export async function runSecCommand(
 
     case "test": {
       const entry = vault.get(arg);
-      // Length + fingerprint only: this is how a capture is confirmed without
+      // Length + a truncated label: this is how a capture is confirmed without
       // echoing the value back into the terminal or the transcript.
       ctx.ui.notify(
         entry
-          ? `sec:${arg} · len ${entry.length} · sha256:${entry.fingerprint} · added ${new Date(entry.addedAt).toISOString()}`
+          ? `sec:${arg} · ${labelOf(entry)} · len ${entry.length} · added ${new Date(entry.addedAt).toISOString()}`
           : `sec:${arg} is not in this session`,
         entry ? "info" : "warning",
       );

@@ -1,4 +1,5 @@
 import { MAX_REF_BYTES, envVarName, findEnvVarCollision, fingerprint, isValidName } from "./refs.ts";
+import { maskPreview } from "./preview.ts";
 
 export type SecretTier = "session" | "ambient";
 export type SecretSource = "prompt" | "paste";
@@ -11,6 +12,17 @@ export interface VaultEntry {
   source: SecretSource;
   length: number;
   fingerprint: string;
+  /**
+   * A truncated, value-DERIVED label (`ghp_A1b2…Q7R8`) or undefined when the value is too
+   * short for a preview to be safe. Computed once at insert time, so it travels with the
+   * entry instead of every consumer re-deriving it from the value.
+   *
+   * This is a deliberate weakening of "receipts and listings are value-free by
+   * construction": a few characters of a long secret now reach the transcript, which is
+   * what makes them recognisable to the person who pasted them. The length gate in
+   * src/preview.ts is what keeps that bounded, and short values keep the digest instead.
+   */
+  preview?: string;
 }
 
 /** Debug-safe projection: hasOwnProperty("value") must be false. */
@@ -18,6 +30,7 @@ export interface PublicEntry {
   name: string;
   length: number;
   fingerprint: string;
+  preview?: string;
   addedAt: number;
   tier: SecretTier;
   source: SecretSource;
@@ -32,6 +45,7 @@ function toPublic(entry: VaultEntry): PublicEntry {
     name: entry.name,
     length: entry.length,
     fingerprint: entry.fingerprint,
+    preview: entry.preview,
     addedAt: entry.addedAt,
     tier: entry.tier,
     source: entry.source,
@@ -73,6 +87,7 @@ export class Vault {
       source,
       length: value.length,
       fingerprint: fingerprint(value),
+      preview: maskPreview(value),
     };
     this.#map.set(name, entry);
     // Projection, never the value-bearing entry: a failing toMatchObject on the

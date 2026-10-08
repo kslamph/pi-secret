@@ -260,6 +260,8 @@ export function scrubOutputSnapshot(details: unknown, vault: Vault): void {
 export interface CaptureReceipt {
   name: string;
   fingerprint: string;
+  /** Human-recognisable label: `ghp_A1b2…Q7R8`, or the digest for a short value. */
+  label: string;
   length: number;
   source: "paste";
 }
@@ -287,7 +289,13 @@ export function captureFromText(
   for (const item of out.captured) {
     try {
       const entry = vault.add(item.name, item.candidate.value, "paste");
-      captured.push({ name: entry.name, fingerprint: entry.fingerprint, length: entry.length, source: "paste" });
+      captured.push({
+        name: entry.name,
+        fingerprint: entry.fingerprint,
+        label: entry.preview ?? `sha256:${entry.fingerprint}`,
+        length: entry.length,
+        source: "paste",
+      });
     } catch {
       // A name the vault refuses (invalid, or colliding shell variable) must not
       // leave a ref sitting in the user's message pointing at nothing: they would

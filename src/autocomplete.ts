@@ -46,7 +46,7 @@ export function createSecAutocompleteProvider(getVault: () => Vault): Autocomple
         .map((e) => ({
           value: e.name,
           label: e.name,
-          description: `len ${e.length} · sha256:${e.fingerprint}`,
+          description: `${e.preview ?? `sha256:${e.fingerprint}`} · len ${e.length}`,
         }));
       return items.length ? { items, prefix: match.prefix } : null;
     },

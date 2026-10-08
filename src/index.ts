@@ -146,7 +146,7 @@ export default function piSecure(pi: ExtensionAPI): void {
     appendReceipt(pi, out.captured);
     ctx.ui.notify(
       out.captured
-        .map((c) => `captured sec:${c.name} · len ${c.length} · sha256:${c.fingerprint}`)
+        .map((c) => `captured sec:${c.name} · ${c.label} · len ${c.length}`)
         .join("\n"),
       "info",
     );

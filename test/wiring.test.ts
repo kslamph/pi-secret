@@ -250,7 +250,7 @@ describe("/sec dispatcher", () => {
     expect(input).not.toHaveBeenCalled();
   });
 
-  it("renames and tests by fingerprint", async () => {
+  it("renames, and identifies an entry by its masked preview", async () => {
     const vault = new Vault("t");
     vault.add("old", GH, "prompt");
     const notify = vi.fn();
@@ -258,8 +258,20 @@ describe("/sec dispatcher", () => {
     expect(vault.resolve("new")).toBe(GH);
     await runSecCommand("test new", vault, { ui: { notify } } as never);
     const last = notify.mock.calls.at(-1)![0] as string;
-    expect(last).toMatch(/sha256:[0-9a-f]{4}/);
+    // This is the whole point of the change: a person can tell which key this is. A digest
+    // was safe and unreadable, which made "confirm the capture" a formality.
+    expect(last).toMatch(/ghp_A1b2…Q7R8/);
     expect(last).not.toContain(GH);
+  });
+
+  it("still identifies a short secret by its digest, because no preview is safe", async () => {
+    const vault = new Vault("t");
+    vault.add("pw", "correct-horse-battery", "prompt");
+    const notify = vi.fn();
+    await runSecCommand("test pw", vault, { ui: { notify } } as never);
+    const last = notify.mock.calls.at(-1)![0] as string;
+    expect(last).toMatch(/sha256:[0-9a-f]{4}/);
+    expect(last).not.toContain("horse");
   });
 
   it("routes an unknown subcommand to usage, not a crash", async () => {

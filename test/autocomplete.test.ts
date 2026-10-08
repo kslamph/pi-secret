@@ -29,12 +29,15 @@ describe("{{sec: completion", () => {
     expect(out?.prefix).toBe("{{sec:db");
   });
 
-  it("describes each entry with length and fingerprint only, never a value", async () => {
+  it("describes each entry with a masked preview, and never with a value", async () => {
     const out = await suggest(vault(), "{{sec:");
     const text = JSON.stringify(out);
     expect(text).not.toContain(GH);
     expect(text).not.toContain("s3cr3t");
-    expect(out?.items[0]?.description).toMatch(/len \d+ · sha256:[0-9a-f]{4}/);
+    // A recognisable prefix is the point: it is what lets the user tell two keys apart.
+    expect(out?.items[0]?.description).toBe("ghp_A1b2…Q7R8 · len 40");
+    // The DSN is neither a provider format nor random-looking, so no characters of it show.
+    expect(out?.items[1]?.description).toMatch(/^sha256:[0-9a-f]{4} · len/);
   });
 
   it("stays out of the way for ordinary braces and other text", async () => {

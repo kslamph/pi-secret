@@ -4,8 +4,9 @@ import type { Vault } from "../vault.ts";
 
 /**
  * The model's only window into the vault, and the carrier of the one rule it has to
- * learn. Value-free by construction: entries are the vault's `PublicEntry`
- * projection, which has no `value` field to leak.
+ * learn. It never carries a value: entries are the vault's `PublicEntry` projection, which
+ * has no `value` field, and the only value-derived string is the truncated preview label
+ * (`ghp_A1b2…Q7R8`) — bounded by src/preview.ts, and the digest instead for short values.
  */
 export function createSecListTool(getVault: () => Vault): ToolDefinition {
   return {
@@ -31,7 +32,7 @@ export function createSecListTool(getVault: () => Vault): ToolDefinition {
           details: { names: [] as string[] },
         };
       }
-      const lines = entries.map((e) => `sec:${e.name} · len ${e.length} · sha256:${e.fingerprint} · ${e.tier}-only`);
+      const lines = entries.map((e) => `sec:${e.name} · ${e.preview ?? `sha256:${e.fingerprint}`} · len ${e.length} · ${e.tier}-only`);
       return {
         content: [
           { type: "text" as const, text: `Available secrets (values are never shown):\n${lines.join("\n")}` },
