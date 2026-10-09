@@ -2,18 +2,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { activeVault, dropSessionVault, setActiveScopeKey, vaultForSession, type Vault } from "./vault.ts";
 import {
   captureFromText,
+  findGuesses,
   injectToolCall,
   scrubCompactionSummaryFile,
   scrubDeepFailClosed,
   scrubOutputSnapshot,
   scrubToolResult,
+  type CaptureScope,
 } from "./glue.ts";
 import { bashIsOwnedByPiSecret, registerSecureBash } from "./tools/bash.ts";
 import { createSecListTool } from "./tools/sec-list.ts";
 import { bashRedirectWarning } from "./redirect.ts";
 import { createSecAutocompleteProvider } from "./autocomplete.ts";
 import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } from "./receipt.ts";
-import { isEnabled } from "./state.ts";
+import { fingerprint } from "./refs.ts";
+import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
 export const VERSION = "0.2.0";
@@ -79,6 +82,65 @@ function ownsBash(pi: ExtensionAPI): boolean {
   }
 }
 
+/**
+ * The shape-only candidates, as one question a person can answer.
+ *
+ * Every field is a REASON we think this is a secret and nothing that says it is: no
+ * keyword, no provider format, just length and character distribution. Showing that
+ * plainly is the point — the alternative is what a receipt said on 2026-10-09,
+ * `sec:secret · len 21`, which gave the reader no way to tell a guess from a fact.
+ */
+function guessSummary(guesses: Array<{ value: string; evidence?: string }>): string {
+  const lines = guesses.map((g, i) => {
+    const parts = [`len ${g.value.length}`, `sha ${fingerprint(g.value)}`, g.evidence ?? ""];
+    return `  ${i + 1}. ${parts.filter(Boolean).join(" · ")}`;
+  });
+  return [
+    "possible secret, but nothing but its shape says so",
+    "",
+    ...lines,
+    "",
+    "Capture? yes = replace with a secret reference. no = send your text unchanged.",
+    "Declining remembers this value: it will not ask again this session.",
+  ].join("\n");
+}
+
+/**
+ * The capture policy on the input path.
+ *
+ * A capture backed by evidence — a provider prefix, a keyword, a flag, a Chinese password
+ * word — is applied without asking, exactly as before. A capture backed only by shape is
+ * ASKED about first, because rewriting someone's sentence on a guess is the one failure
+ * that is both silent and unrecoverable: the rewrite happens before the message is
+ * persisted, so the original text is gone from the session file afterwards.
+ *
+ * Where asking is impossible — `pi --print`, an RPC client with no dialogs, or the flag
+ * turned off — the guess is DROPPED rather than applied. Dropping is the safe direction
+ * for automation: the value reaches the endpoint unmasked, which is a false negative
+ * someone can see in the request, while an unattended false positive silently rewrites
+ * work the user can no longer reconstruct.
+ */
+async function decideScope(
+  text: string,
+  ctx: ExtensionContext,
+  confirmGuesses: boolean,
+): Promise<{ scope: CaptureScope; leftAlone: number }> {
+  const pending = findGuesses(text).filter((c) => !isDeclined(c.value));
+  if (!pending.length) return { scope: "all", leftAlone: 0 };
+  // Flag off is the user opting OUT of the gate, which restores the old behaviour of
+  // applying every guess. It is NOT the same as having no way to ask: see below.
+  if (!confirmGuesses) return { scope: "all", leftAlone: 0 };
+  // No dialog-capable UI (pi --print, an RPC client): there is nobody to answer the
+  // question, so the guess is DROPPED rather than applied unattended. The value reaches
+  // the endpoint unmasked, which is a false negative visible in the request, while an
+  // unattended false positive silently rewrites work the user cannot reconstruct.
+  if (!ctx.hasUI) return { scope: "evidenced", leftAlone: pending.length };
+  const approved = await ctx.ui.confirm("pi-secret: capture a possible secret?", guessSummary(pending));
+  if (approved) return { scope: "all", leftAlone: 0 };
+  for (const g of pending) declineValue(g.value);
+  return { scope: "evidenced", leftAlone: pending.length };
+}
+
 export default function piSecret(pi: ExtensionAPI): void {
   /**
    * DEFAULT TRUE, which inverts the original design.
@@ -103,11 +165,26 @@ export default function piSecret(pi: ExtensionAPI): void {
     default: true,
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  /**
+   * Ask before rewriting a prompt on a SHAPE-ONLY match.
+   *
+   * Default true. Tier 1 (a provider prefix) and tier 2 (a keyword, a flag, a Chinese
+   * password word) are evidence and are applied silently; tier 3 is a guess, and a guess
+   * that rewrites your sentence costs more than a keystroke. Turn it off for the old
+   * behaviour — every guess applied without asking.
+   */
+  pi.registerFlag("sec-confirm-guess", {
+    description: "Ask before capturing a secret that only its shape suggests (default on)",
+    type: "boolean",
+    default: true,
+  });
+
+  pi.on("session_start", async (event, ctx) => {
     // A reload rebuilds the extension but not the process, so these two must not be
     // sticky across sessions or the warning would never fire for a later session.
     providerHookFired = false;
     providerHookWarned = false;
+    if (event.reason !== "reload") resetDeclined(); // a decline is about one value in one session
     setActiveScopeKey(sessionScope(ctx));
     registerSecureBash(pi, ctx.cwd, { vault: () => vault(ctx) });
     pi.registerTool(createSecListTool(() => vault(ctx)));
@@ -155,16 +232,33 @@ export default function piSecret(pi: ExtensionAPI): void {
 
   pi.on("input", async (event, ctx) => {
     if (!isEnabled() || event.source === "extension") return undefined;
-    const out = captureFromText(event.text, vault(ctx));
+    let confirmGuesses = true;
+    try {
+      confirmGuesses = pi.getFlag("sec-confirm-guess") !== false;
+    } catch {
+      /* no flag support: keep the safer default */
+    }
+    const { scope, leftAlone } = await decideScope(event.text, ctx, confirmGuesses);
+    const out = captureFromText(event.text, vault(ctx), { scope });
+    if (out.captured.length) {
+      appendReceipt(pi, out.captured);
+      ctx.ui.notify(
+        out.captured
+          .map((c) => `captured sec:${c.name} · ${c.label} · len ${c.length}${c.evidence ? ` · ${c.evidence}` : ""}`)
+          .join("\n"),
+        "info",
+      );
+    }
+    if (leftAlone > 0) {
+      // Said out loud on purpose: a silent no-op looks identical to a detector that
+      // simply did not fire, and the user cannot tell those apart.
+      ctx.ui.notify(
+        `pi-secret: left ${leftAlone} possible secret(s) in your text (no keyword, shape only)`,
+        "warning",
+      );
+    }
+    if (out.captured.length && ctx.hasUI) ctx.ui.setStatus("pi-secret", `sec: ${vault(ctx).size()} active`);
     if (!out.captured.length) return undefined;
-    appendReceipt(pi, out.captured);
-    ctx.ui.notify(
-      out.captured
-        .map((c) => `captured sec:${c.name} · ${c.label} · len ${c.length}`)
-        .join("\n"),
-      "info",
-    );
-    if (ctx.hasUI) ctx.ui.setStatus("pi-secret", `sec: ${vault(ctx).size()} active`);
     // The value is already in the vault and the text now carries only the ref, so
     // this transform runs BEFORE persistence — nothing sensitive reaches the file.
     return { action: "transform" as const, text: out.text };

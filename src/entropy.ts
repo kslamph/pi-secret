@@ -31,20 +31,30 @@
  * this V8 to make the readable form work: `new RegExp(src, "gx")` throws SyntaxError at
  * module load.
  */
-export const PROVIDER_PREFIX_SOURCES = [
-  "dckr_pat_[A-Za-z0-9_\\-]{20,}",
-  "github_pat_[A-Za-z0-9_]{20,}",
-  "gh[pousr]_[A-Za-z0-9]{20,}",
-  "sk-ant-[A-Za-z0-9_\\-]{20,}",
-  "sk-[A-Za-z0-9]{20,}",
-  "AIza[0-9A-Za-z_\\-]{30,}",
-  "(?:AKIA|ASIA)[0-9A-Z]{16}",
-  "xox[baprs]-[A-Za-z0-9\\-]{10,}",
-  "glpat-[A-Za-z0-9_\\-]{20,}",
-  "npm_[A-Za-z0-9]{30,}",
-  "pypi-Po-[A-Za-z0-9]{20,}",
-  "hf_[A-Za-z0-9]{20,}",
+export const PROVIDER_PREFIXES: ReadonlyArray<{ hint: string; source: string }> = [
+  { hint: "docker_pat", source: "dckr_pat_[A-Za-z0-9_\\-]{20,}" },
+  { hint: "github_pat", source: "github_pat_[A-Za-z0-9_]{20,}" },
+  { hint: "github", source: "gh[pousr]_[A-Za-z0-9]{20,}" },
+  { hint: "anthropic", source: "sk-ant-[A-Za-z0-9_\\-]{20,}" },
+  // `sk-` with no marker is OpenAI. It was MISSING from capture.ts's copy of this table,
+  // so `sk-proj-…` was recognised by the scrubber and the preview but only ever captured
+  // as an entropy-tier guess. Tier 1 is where a provider format belongs: it carries the
+  // hint, it cannot mis-slice, and it survives any tightening of tier 3.
+  { hint: "openai", source: "sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\\-]{20,}" },
+  { hint: "google", source: "AIza[0-9A-Za-z_\\-]{30,}" },
+  // The other AWS identifier prefixes, not just the two access-key ones: a role id or an
+  // account id pasted into a prompt is as much a credential as AKIA.
+  { hint: "aws_access_key_id", source: "(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}" },
+  { hint: "slack", source: "xox[baprs]-[A-Za-z0-9\\-]{10,}" },
+  { hint: "gitlab", source: "glpat-[A-Za-z0-9_\\-]{20,}" },
+  { hint: "npm", source: "npm_[A-Za-z0-9]{30,}" },
+  { hint: "pypi", source: "pypi-Po-[A-Za-z0-9]{20,}" },
+  { hint: "huggingface", source: "hf_[A-Za-z0-9]{20,}" },
+  { hint: "stripe", source: "[sr]k_(?:live|test)_[0-9A-Za-z]{16,}" },
+  { hint: "sendgrid", source: "SG\\.[A-Za-z0-9_\\-]{16,}\\.[A-Za-z0-9_\\-]{16,}" },
 ];
+
+export const PROVIDER_PREFIX_SOURCES = PROVIDER_PREFIXES.map((p) => p.source);
 
 /** The whole value matches a known provider key format. Anchored, never a substring test. */
 const PROVIDER_FORMAT_ANCHORED = new RegExp(`^(?:${PROVIDER_PREFIX_SOURCES.join("|")})$`);
@@ -113,6 +123,116 @@ export function looksCredentialish(text: string): boolean {
   if (/^[A-Za-z0-9._/-]+$/.test(t) && t.includes("/")) return false; // filesystem path
   const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9\s]/].filter((r) => r.test(t)).length;
   return classes >= 2 && shannonEntropy(t) > 3.6;
+}
+
+/**
+ * Is this text built out of WORDS rather than random bytes?
+ *
+ * The entropy tier's real discriminator, and the one its own author reached for too
+ * late. Shannon entropy cannot tell `NewPaymentCaseReconcilerFromContext` from a secret,
+ * because both mix cases and neither repeats much: measured 4.14 vs 3.99 bits/char
+ * respectively — the identifier scores HIGHER. What separates them is structure: a name
+ * is built from word runs (`[A-Z]?[a-z]{3,}` — "New", "Payment", "Case", …), while random
+ * bytes produce one- and two-letter runs almost exclusively. So the ratio of characters
+ * inside word runs is the signal entropy was supposed to be.
+ *
+ * TWO runs are required, not one. Measured: a 26-character secret of sixteen lowercase
+ * letters followed by ten digits has a single run covering 62% of it, so a ratio-only rule
+ * classified that credential as an identifier and dropped it. Random text stretches its
+ * letters out; only a NAME chains several of them together.
+ */
+const WORD_RUN_RE = /[A-Z]?[a-z]{3,}/g;
+export const IDENTIFIER_WORD_RATIO = 0.6;
+
+export function looksLikeIdentifierText(value: string): boolean {
+  const runs = value.match(WORD_RUN_RE);
+  if (!runs || runs.length < 2) return false;
+  const wordChars = runs.reduce((n, w) => n + w.length, 0);
+  return wordChars / value.length >= IDENTIFIER_WORD_RATIO;
+}
+
+/**
+ * Placeholder values: templates, doc examples, redaction markers, type names.
+ *
+ * Anchored to the WHOLE value, never a substring test, because the whole point is that
+ * `password=secret` is not a secret while a twelve-character password is. Without this,
+ * every `token: <your-token-here>` and every `change-me` in a pasted config was rewritten
+ * into a ref, which is worse than missing: the user loses the literal they were reading.
+ */
+const PLACEHOLDER_VALUE_RE = new RegExp(
+  "^(?:" +
+    [
+      "x{3,}",
+      "\\*{3,}",
+      "\\.{3,}",
+      "-{3,}",
+      "_{3,}",
+      "<[^>]*>",
+      "\\[[^\\]]*\\]",
+      "\\{\\{[^}]*\\}\\}",
+      "\\$\\{[^}]*\\}",
+      "%[A-Za-z_]+%",
+      "your[-_ ]?\\w*",
+      "change[-_]?me",
+      "replace[-_]?me",
+      "placeholder",
+      "redacted",
+      "dummy",
+      "sample",
+      "example",
+      "todo",
+      "null|none|nil|undefined|true|false|empty",
+      "string|str|int|integer|number|bool|boolean|any|object|required|optional",
+      "env|secret|password|passwd|pwd|token|api[-_]?key|credential|auth",
+      "test|tests|foobar|xxx+",
+    ].join("|") +
+    ")$",
+  "i",
+);
+
+export function isPlaceholderValue(value: string): boolean {
+  const v = value.trim();
+  return v.length === 0 || PLACEHOLDER_VALUE_RE.test(v);
+}
+
+/**
+ * A REFERENCE to a secret, not the secret: an env lookup, a call, a typed slot.
+ *
+ * This is the rule that stopped capture from rewriting working code into broken code.
+ * Before it, a line calling a password helper was captured as a secret, and an env lookup
+ * was captured as its own TRUNCATED PREFIX — the text up to the opening quote, out of the
+ * whole call — which is a rewrite that changes what the code means. capture.ts's own
+ * comment already called over-capture the accepted failure direction; this is the case
+ * where accepting it was simply wrong.
+ *
+ * Deliberately narrow: a bare word is NOT a reference (`hunter2` is a password), so the
+ * dotted and called forms require their punctuation. A JWT has dots too, but tier 1
+ * catches it before any value-level filter runs, and no anchored candidate is vetoed here.
+ */
+const REFERENCE_PREFIX_RE =
+  /^(?:\$|%[A-Za-z_]+|@|process\.env|os\.environ|os\.getenv|System\.getenv|ENV\[|env\.|config\.|settings\.|self\.|this\.|args\.|opts\.|options\.|req\.|request\.|params\.|input\(|getpass|prompt\()/i;
+const DOTTED_REF_RE = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\(?\)?$/;
+const CALLED_REF_RE = /^[A-Za-z_]\w*\(\)?$/;
+/**
+ * A typed slot, e.g. `Optional[str]`.
+ *
+ * A PREFIX test, not an anchored one, and that detail is load-bearing: the value that
+ * reaches this predicate has already been delimiter-trimmed, and trimming strips a
+ * trailing bracket — so an anchored `^[A-Z]\w*\[.*\]$` misses exactly the case it exists
+ * for, and a Rust line that declares a `password` field of an optional string gets
+ * captured as a secret whose value is the type name minus its last character. A secret
+ * never begins with a bracketed type name; base64 has no brackets at all.
+ */
+const TYPED_SLOT_RE = /^[A-Z]\w*\[/;
+
+export function looksLikeSecretReference(value: string): boolean {
+  const v = value.trim();
+  return (
+    REFERENCE_PREFIX_RE.test(v) ||
+    DOTTED_REF_RE.test(v) ||
+    CALLED_REF_RE.test(v) ||
+    TYPED_SLOT_RE.test(v)
+  );
 }
 
 /**

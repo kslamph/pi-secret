@@ -7,6 +7,14 @@ export interface ReceiptItem {
   fingerprint: string;
   label: string;
   source: "prompt" | "paste";
+  /**
+   * Why this was captured, when the reason is a judgement rather than a format.
+   *
+   * Rendered in the dim tail so a shape-only capture is distinguishable from a
+   * keyword hit after the fact, which is the whole difference between "the tool was
+   * wrong and I can find out why" and a mystery.
+   */
+  evidence?: string;
 }
 
 export interface Receipt {
@@ -28,7 +36,7 @@ export function buildReceiptComponent(receipt: Receipt, theme: Theme): Component
     box.addChild(
       new Text(
         `${theme.fg("accent", "captured")} ${theme.fg("toolTitle", `sec:${c.name}`)} · ` +
-          theme.fg("dim", `${c.label} · len ${c.length} · this session only`),
+          theme.fg("dim", `${c.label} · len ${c.length} · this session only${c.evidence ? ` · ${c.evidence}` : ""}`),
         0,
         0,
       ),

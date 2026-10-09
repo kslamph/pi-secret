@@ -1,6 +1,14 @@
 import { findRefs } from "./substitute.ts";
 import { isValidName, MIN_SCRUBABLE_LENGTH } from "./refs.ts";
-import { looksCredentialish, shannonEntropy } from "./entropy.ts";
+import {
+  IDENTIFIER_WORD_RATIO,
+  PROVIDER_PREFIXES,
+  isPlaceholderValue,
+  looksCredentialish,
+  looksLikeIdentifierText,
+  looksLikeSecretReference,
+  shannonEntropy,
+} from "./entropy.ts";
 
 export type Confidence = "anchored" | "kv" | "entropy";
 
@@ -10,47 +18,161 @@ export interface Candidate {
   end: number;
   confidence: Confidence;
   hint?: string;
+  /**
+   * Why this candidate was raised, in words a person can argue with.
+   *
+   * It exists because of a receipt that said only `sec:secret · len 21`: three
+   * ordinary-looking runs from a Chinese expense prompt were rewritten into refs, the
+   * user had no way to tell a shape guess from a keyword hit, and by the time the model
+   * complained the original sentence was already gone. The confirm dialog and the receipt
+   * both render this, so a wrong guess is visible BEFORE it costs anything.
+   */
+  evidence?: string;
 }
 
+// Tier 1 is derived from the shared provider table rather than restated: capture needs
+// the hint, and the scrubber needs the pattern, and two copies of one list is how
+// `sk-proj-…` ended up recognised by everything except the thing that rewrites prompts.
 const ANCHORED: Array<{ re: RegExp; hint: string }> = [
-  { re: /dckr_pat_[A-Za-z0-9_\-]{20,}/g, hint: "docker_pat" },
-  { re: /github_pat_[A-Za-z0-9_]{20,}/g, hint: "github_pat" },
-  { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, hint: "github" },
-  { re: /sk-ant-[A-Za-z0-9_\-]{20,}/g, hint: "anthropic" },
-  { re: /AIza[0-9A-Za-z_\-]{30,}/g, hint: "google" },
-  { re: /(?:AKIA|ASIA)[0-9A-Z]{16}/g, hint: "aws_access_key_id" },
-  { re: /xox[baprs]-[A-Za-z0-9\-]{10,}/g, hint: "slack" },
-  { re: /glpat-[A-Za-z0-9_\-]{20,}/g, hint: "gitlab" },
-  { re: /npm_[A-Za-z0-9]{30,}/g, hint: "npm" },
-  { re: /pypi-Po-[A-Za-z0-9]{20,}/g, hint: "pypi" },
-  { re: /hf_[A-Za-z0-9]{20,}/g, hint: "huggingface" },
+  ...PROVIDER_PREFIXES.map((p) => ({ re: new RegExp(p.source, "g"), hint: p.hint })),
 ];
 
 const JWT_RE = /eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{8,}/g;
 const PEM_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
-// A: KV value classes. The BARE form stops at whitespace and quotes and deliberately ALLOWS
-// `&` and `\` to match Task 5's scrub class; excluding them leaked a tail in the clear.
-// C: the QUOTED forms capture the interior of `="..."` / `='...'` whole (whitespace included)
-// to the matching closing quote. A quoted value is NOT extended by A (the interior is already
-// whole); an UNCLOSED quote matches neither form and yields no candidate. J: the keyword must
-// sit at a SEGMENT boundary (lookbehind/lookahead) so `my_key=` matches but `monkey=`,
-// `turnkey=`, `keyboard=` do not; and a JSON-escaped opening/closing quote (`\"`) is accepted.
-const KV_BARE_RE =
-  /([A-Za-z0-9_\-]*(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]*)["']?\s*[=:]\s*([^\s"'<>]{8,})/gi;
-const KV_DQUOTE_RE =
-  /([A-Za-z0-9_\-]*(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]*)["']?\s*[=:]\s*\\?"([^"\\]{8,}?)\\?"/gi;
-const KV_SQUOTE_RE =
-  /([A-Za-z0-9_\-]*(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]*)["']?\s*[=:]\s*\\?'([^'\\]{8,}?)\\?'/gi;
+/**
+ * A private key pasted TRUNCATED — no END line, because the paste stopped.
+ *
+ * Before this, a half-pasted key produced no anchored candidate at all and survived only
+ * if the base64 body happened to clear the entropy floor, which is the least reliable way
+ * to protect a private key. The body is bounded to a real base64/whitespace run so this
+ * cannot swallow the rest of the prompt. It is collected BEFORE the whole-block rule so a
+ * truncated paste is never also treated as a PEM region whose interior is excluded.
+ */
+const PEM_TRUNCATED_RE = /-{5}BEGIN [A-Z0-9 ]*PRIVATE KEY-{5}[A-Za-z0-9+/=\r\n ]{64,4096}/g;
+/**
+ * How short a value may be and still count, decided by the keyword next to it.
+ *
+ * One flat floor of 8 was wrong in both directions at once: it dropped a 7-character
+ * password behind a strong `DB_PASSWORD=` key (the one place a user is certain it IS a
+ * password), and it invited a class of false positives we then filtered one shape at a
+ * time. A keyword that says "password" needs almost no corroboration; a keyword that says
+ * "token" or "key" does, because those words also head cache keys, ids and config.
+ */
+const STRONG_KEYWORD_RE = /pass|pwd|passphrase|secret|private|credential|密码|口令|密钥|秘钥|私钥/i;
+const MIN_STRONG_VALUE_LENGTH = 3;
+
+/** Optional type annotation between keyword and separator, e.g. `str`, `Optional[str]`. */
+const TYPE_ANNOTATION = String.raw`["'\x60]?[ \t]*:[ \t]*[A-Za-z_][\w.\[\]| ]{0,40}?[ \t]*`;
+/** The keyword, then `=`. */
+const KV_ASSIGN = String.raw`["'\x60]?(?:${TYPE_ANNOTATION})?[ \t]*(?::=|=>|=)[ \t]*`;
+/** The keyword, then `:` — JSON, YAML, HTTP headers. */
+const KV_COLON = String.raw`["'\x60]?[ \t]*:[ \t]*`;
+
+/**
+ * The keyword, at a SEGMENT boundary, so `my_key=` matches while `monkey=`, `turnkey=` and
+ * `keyboard=` do not. Kept as a source string because four rules share it now and a
+ * divergence between them would be invisible.
+ */
+const KV_KEYWORD_SOURCE = String.raw`([A-Za-z0-9_\-]*(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]*)`;
+
+// A: the BARE value stops at whitespace and quotes and deliberately ALLOWS `&` and `\`,
+// because excluding them leaked a credential's tail in the clear.
+// C: a QUOTED value captures its interior whole (whitespace included); the closing quote is
+// already the correct boundary, so a quoted value is never extended.
+const KV_BARE_RE = new RegExp(`${KV_KEYWORD_SOURCE}(?:${KV_ASSIGN}|${KV_COLON})([^\\s"'<>]{3,})`, "gi");
+const KV_DQUOTE_RE = new RegExp(`${KV_KEYWORD_SOURCE}(?:${KV_ASSIGN}|${KV_COLON})\\\\?"([^"\\\\]{3,}?)\\\\?"`, "gi");
+const KV_SQUOTE_RE = new RegExp(`${KV_KEYWORD_SOURCE}(?:${KV_ASSIGN}|${KV_COLON})\\\\?'([^'\\\\]{3,}?)\\\\?'`, "gi");
+
+/**
+ * `--password hunter22`, and the equals form of the same.
+ *
+ * The space-separated form has no `=` for the assignment rules to find, so this shape
+ * walked straight past capture: measured, `mysql --password hunter22 -h host` was missed.
+ */
+const KV_FLAG_RE =
+  /(?<![\w-])--?(password|passwd|pwd|pass|secret|token|api-?key|access-?key|auth-?token|authorization)(?:=|[ \t]+)["']?([^\s"'\n]{3,})/gi;
+
+/**
+ * Chinese: a password word followed by a colon, an equals, or one of the verbs
+ * 是 / 为 / 设为 / 改为 that carry the same meaning.
+ *
+ * The keyword list above is ASCII, so a Chinese prompt had no recognised way to say
+ * "password" — measured misses on a bare colon form and on a full sentence containing one.
+ * These forms also use full-width punctuation, which the value class must tolerate.
+ */
+const KV_CJK_RE =
+  /(密码|口令|密钥|秘钥|令牌|私钥)(?:[ \t]*(?:是|为|叫|设为|设置为|改为|改成|修改为)[ \t]*|[ \t]*[:：=][ \t]*)["'“‘「]?([\x21-\x7E]{3,})/g;
+
+/**
+ * English prose: `my password is Tr0ub4dor&3`.
+ *
+ * Its validator is the reason this rule cannot chew a sentence: a value with no digit, no
+ * symbol and no case change is prose, so `the password is incorrect` stays untouched.
+ */
+const KV_PROSE_RE =
+  /\b(password|passwd|passcode|passphrase|secret|api[ _-]?key|token)\b[ \t]+(?:is|was)(?:[ \t]*:[ \t]*|[ \t]+)["'“‘]?([^\s"'”’,;]{4,})/gi;
+
+/**
+ * Basic auth on a command line: `curl -u admin:p@ssw0rd`.
+ *
+ * Only the PASSWORD half is captured. A username is not a credential, and storing the
+ * whole pair buys nothing the user cannot already read off their own screen.
+ */
+const BASIC_AUTH_RE = /(?<![\w-])(?:-u|--user)[ \t]+['"]?[^\s:'"]+:["']?([^\s'"]{3,})/g;
 
 const DENY_RE =
   /^[0-9a-f]{7}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function collect(text: string, re: RegExp, confidence: Confidence, hint?: string): Candidate[] {
+/**
+ * The rules that need a key text beside the value, with the per-rule verdict on it.
+ *
+ * `validate` is where each rule states what its own value must look like, because the
+ * shapes are not interchangeable: a prose value needs a digit or symbol to be a secret,
+ * and every value everywhere needs the placeholder and reference vetoes.
+ */
+interface KvRule {
+  re: RegExp;
+  /** Fixed hint for rules with no key text of their own. */
+  hint?: string;
+  /** Group index of the value. Defaults to 2, which every rule here keeps. */
+  valueIndex?: number;
+  validate?: (value: string, key: string) => boolean;
+}
+
+/** True for a value that is a template, a type name, an env lookup or a call. */
+function isVetoedValue(value: string): boolean {
+  return isPlaceholderValue(value) || looksLikeSecretReference(value);
+}
+
+/** The keyword decides how much corroboration the value needs. */
+function valueLengthOk(value: string, key: string): boolean {
+  const floor = STRONG_KEYWORD_RE.test(key) ? MIN_STRONG_VALUE_LENGTH : MIN_SCRUBABLE_LENGTH;
+  return value.length >= floor;
+}
+
+const KV_RULES: KvRule[] = [
+  { re: KV_BARE_RE },
+  { re: KV_DQUOTE_RE },
+  { re: KV_SQUOTE_RE },
+  { re: KV_FLAG_RE },
+  { re: KV_CJK_RE },
+  {
+    re: KV_PROSE_RE,
+    validate: (value) => {
+      if (isVetoedValue(value)) return false;
+      return /\d/.test(value) || /[^A-Za-z0-9]/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value));
+    },
+  },
+  { re: BASIC_AUTH_RE, hint: "basic_auth", valueIndex: 1 },
+];
+
+function collect(text: string, re: RegExp, confidence: Confidence, hint?: string, valueIndex = 0): Candidate[] {
   const out: Candidate[] = [];
   re.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const value = confidence === "kv" ? (m[2] as string) : (m[0] as string);
+    const value = confidence === "kv" ? (m[valueIndex === 0 ? 2 : valueIndex] as string) : (m[0] as string);
+    if (!value) continue;
     const full = m[0] as string;
     // Locate the value within the full match rather than assuming it is the trailing
     // token: the QUOTED KV regexes have a closing quote AFTER the value, so
@@ -61,6 +183,19 @@ function collect(text: string, re: RegExp, confidence: Confidence, hint?: string
     out.push({ value, start, end: start + value.length, confidence, hint: hint ?? m[1] });
   }
   return out;
+}
+
+/** One KV rule's candidates: validate, then extend/trim, then apply the length floor. */
+function collectKv(text: string, rule: KvRule, extend: boolean): Candidate[] {
+  const valueIndex = rule.valueIndex ?? 2;
+  return collect(text, rule.re, "kv", rule.hint, valueIndex)
+    .map((c) => finalizeKv(c, text, extend))
+    .filter((c) => {
+      const key = c.hint ?? "";
+      if (isVetoedValue(c.value)) return false;
+      if (rule.validate && !rule.validate(c.value, key)) return false;
+      return valueLengthOk(c.value, key);
+    });
 }
 
 /** Remove candidates swallowed by a longer one, keeping the widest match. */
@@ -119,11 +254,15 @@ function trimDelimiters(v: string): { value: string; left: number; right: number
 }
 
 /** Finalize a KV candidate: extend to whitespace (bare only), trim delimiters, adjust spans. */
-function finalizeKv(c: Candidate, text: string, extend: boolean): Candidate | null {
+function finalizeKv(c: Candidate, text: string, extend: boolean): Candidate {
   let cand = c;
   if (extend) cand = extendKvToToken(cand, text);
   const t = trimDelimiters(cand.value);
-  if (t.value.length < MIN_SCRUBABLE_LENGTH) return null;
+  // The length floor is NOT applied here. It used to be a flat 8, applied before the
+  // keyword was consulted, which meant a 7-character password behind a strong key was
+  // dropped here and never reached the per-keyword floor in collectKv. A candidate of
+  // zero length is the only thing this can still refuse.
+  if (t.value.length === 0) return { ...cand, value: "", start: cand.start, end: cand.start };
   return { ...cand, value: t.value, start: cand.start + t.left, end: cand.end - t.right };
 }
 
@@ -262,18 +401,14 @@ export function findCandidates(text: string): Candidate[] {
   for (const { re, hint } of ANCHORED) found.push(...collect(text, re, "anchored", hint));
   found.push(...collect(text, JWT_RE, "anchored", "jwt"));
   found.push(...collect(text, PEM_RE, "anchored", "private_key"));
-  // A: extend KV candidates to the full whitespace-free token so a match can never end
-  // inside a credential (see extendKvToToken for the over-capture rationale).
-  // A: extend BARE KV candidates to the full whitespace-free token (see extendKvToToken).
-  // C: quoted KV candidates keep their whole interior (whitespace included) and are NOT
-  // extended — the matching closing quote is already the correct boundary.
-  // G: trim stray delimiters from both ends of every KV value, drop if below MIN length.
-  const finalize = (c: Candidate, extend: boolean): Candidate | null => finalizeKv(c, text, extend);
-  found.push(
-    ...collect(text, KV_BARE_RE, "kv").map((c) => finalize(c, true)).filter((c): c is Candidate => c !== null),
-    ...collect(text, KV_DQUOTE_RE, "kv").map((c) => finalize(c, false)).filter((c): c is Candidate => c !== null),
-    ...collect(text, KV_SQUOTE_RE, "kv").map((c) => finalize(c, false)).filter((c): c is Candidate => c !== null),
-  );
+  // A truncated paste has no END line, so the whole-block rule above cannot see it. It is
+  // collected first so that dedupe keeps whichever is wider when a block is complete.
+  found.push(...collect(text, PEM_TRUNCATED_RE, "anchored", "private_key"));
+  // A: extend BARE KV candidates to the full whitespace-free token so a match can never end
+  // inside a credential (see extendKvToToken for the over-capture rationale). C: a quoted
+  // value keeps its whole interior and is NOT extended — the closing quote is its boundary.
+  // G: trim stray delimiters from both ends of every KV value.
+  for (const rule of KV_RULES) found.push(...collectKv(text, rule, rule.re === KV_BARE_RE));
 
   // J: the deny list applies ONLY to entropy candidates. A key that says `token=` is evidence
   // of intent; a bare hex blob is not. So a legacy 40-hex PAT behind `token=` is captured, not
@@ -298,10 +433,24 @@ export function findCandidates(text: string): Candidate[] {
   // is exactly as secret as `DATABASE_URL=<dsn>` and must not be missed just because it lacks a key.
   // T: PEM bodies and data-URI payloads are excluded structurally (not by entropy).
   const kept: Candidate[] = [...base];
-  const pushEntropy = (token: string, idx: number) => {
-    const cand: Candidate = { value: token, start: idx, end: idx + token.length, confidence: "entropy" };
+  const pushEntropy = (token: string, idx: number): void => {
+    const ent = shannonEntropy(token);
+    const cand: Candidate = {
+      value: token,
+      start: idx,
+      end: idx + token.length,
+      confidence: "entropy",
+      // The evidence a person needs in order to disagree with us, and the whole reason a
+      // guess can be confirmed before it costs anything: every field here is a reason we
+      // think this is a secret and NOTHING about it says so.
+      evidence:
+        `no keyword near it · ${ent.toFixed(2)} bits/char · len ${token.length} · ` +
+        `${/[^\x20-\x7E]/.test(token) ? "non-ascii" : "ascii"} · ` +
+        `${/[0-9]/.test(token) ? "has digit" : "no digit"} · guess only`,
+    };
     if (overlaps(cand) || DENY_RE.test(cand.value)) return;
     if (inPem(cand) || isDataUriPayload(text, idx)) return; // T: PEM body lines and data-URI payloads
+    if (isPlaceholderValue(cand.value) || looksLikeSecretReference(cand.value)) return;
     kept.push(cand);
   };
   for (const raw of new Set(text.split(/[\s,"'()[\]{}<>=;]+/))) {
@@ -335,6 +484,41 @@ export function findCandidates(text: string): Candidate[] {
       const base64ish = /^[A-Za-z0-9+/]+=*$/.test(token) || /^[A-Za-z0-9_-]+=?$/.test(token);
       if (token.length < 20 || ent <= 3.9) { idx = text.indexOf(raw, idx + raw.length); continue; }
       if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      // The three gates added on 2026-10-09, each answering a measured false positive.
+      //
+      // 1. ASCII only. A Chinese prompt has no spaces, so its runs are long, and Shannon
+      //    entropy rewards them: Chinese characters barely repeat, so the same length of
+      //    Chinese scores ~0.4 bits/char HIGHER than Latin. Measured on the real capture,
+      //    `保持bitbucket和lightnode不变，` scored 4.14 and was rewritten into a ref — with one
+      //    Latin brand name in it, which is what supplied the second character class that
+      //    looksCredentialish requires. A real pasted credential that contains non-ASCII is
+      //    vanishingly rare next to how often ordinary Chinese prose reaches this line.
+      if (/[^\x20-\x7E]/.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      // 2. Not built out of words. `NewPaymentCaseReconcilerFromContext` scored 4.14 bits/char
+      //    — HIGHER than the secret it was mistaken for — so entropy was never going to
+      //    separate them. Structure does: names are word runs, random bytes are not.
+      if (looksLikeIdentifierText(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      // 3. Shape rules that separate a random token from a CONSTANT. Written as four
+      //    small tests rather than "must have lower, upper and a digit", because that
+      //    blunter form was measured losing a real secret: a 29-character all-lowercase
+      //    token with digits is an ordinary base64 blob, and it has no uppercase at all.
+      //    What actually identifies a constant is that it has no digits, or is hex.
+      if (/^[0-9a-f]+$/i.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (!/[a-z]/.test(token) && !/[0-9]/.test(token)) {
+        idx = text.indexOf(raw, idx + raw.length); // ALL-CAPS word, e.g. an env var name
+        continue;
+      }
+      // 4. A snake/kebab CONSTANT: no digits anywhere, and every segment a plain word.
+      //    The no-digits half is load-bearing. Without it the rule also eats
+      //    `sk-proj-<random>`, whose first two segments are pure letters — the exact
+      //    misfire that made the third-party detector's version of this rule unusable.
+      if (!/[0-9]/.test(token)) {
+        const segs = token.split(/[_-]/).filter(Boolean);
+        if (segs.length >= 3 && segs.every((s) => /^[A-Za-z]{2,}$/.test(s))) {
+          idx = text.indexOf(raw, idx + raw.length);
+          continue;
+        }
+      }
       pushEntropy(token, idx);
       idx = text.indexOf(raw, idx + raw.length);
     }

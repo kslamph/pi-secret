@@ -520,9 +520,13 @@ describe("task 17 — L: base64 padding re-attached exactly, not greedily", () =
 
   it("rejects a len%4===1 residue (no padding) as not valid base64", () => {
     // 21-char base64 with no `=`: pad would be 3, which is invalid, so it is left unpadded.
-    const cs = findCandidates("the value is AbCdEfGhIjKlMnOpQrStU now");
+    // The body carries a digit because tier 3 now requires lower+upper+digit before a bare
+    // token is even considered (see the gate in capture.ts). The property this test pins —
+    // a len%4===1 residue is never given padding — is untouched by that: same length,
+    // same residue, same expectation.
+    const cs = findCandidates("the value is AbCd1fGhIjKlMnOpQrStU now");
     expect(cs).toHaveLength(1);
-    expect(cs[0]!.value).toBe("AbCdEfGhIjKlMnOpQrStU");
+    expect(cs[0]!.value).toBe("AbCd1fGhIjKlMnOpQrStU");
     expect(cs[0]!.value.length % 4).toBe(1);
   });
 });

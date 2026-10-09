@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSecret from "../src/index.ts";
 import { activeScopeKey, setActiveScopeKey, vaultForSession, dropSessionVault } from "../src/vault.ts";
-import { isEnabled, setEnabled } from "../src/state.ts";
+import { isEnabled, setEnabled, resetDeclined, declinedCount } from "../src/state.ts";
 import { runSecCommand } from "../src/commands.ts";
 import { Vault } from "../src/vault.ts";
 import { scrubToolResult } from "../src/glue.ts";
@@ -19,13 +19,17 @@ function harness() {
   const tools = new Map<string, unknown>();
   const commands = new Map<string, unknown>();
   const entryRenderers = new Map<string, unknown>();
+  const flags: Record<string, boolean> = {};
   const pi = {
     on: (type: string, h: Handler) => handlers.set(type, [...(handlers.get(type) ?? []), h]),
     registerTool: (t: { name: string }) => tools.set(t.name, t),
     registerCommand: (name: string, c: unknown) => commands.set(name, c),
     registerEntryRenderer: (type: string, r: unknown) => entryRenderers.set(type, r),
     registerFlag: vi.fn(),
-    getFlag: () => false,
+    // Flag values are per-test state now: `sec-confirm-guess` decides whether a
+    // shape-only capture asks, so the harness has to be able to answer either way.
+    // Unset stays false, which is what the previous `() => false` did for every flag.
+    getFlag: (name: string) => flags[name] === true,
     appendEntry: vi.fn(),
     getAllTools: () =>
       [...tools.values()].map((t) => ({
@@ -51,7 +55,7 @@ function harness() {
     for (const h of handlers.get(type) ?? []) last = await h(event, ctx);
     return last;
   };
-  return { pi, fire, tools, commands, entryRenderers, registered: () => handlers };
+  return { pi, fire, tools, commands, entryRenderers, setFlag: (n: string, v: boolean) => void (flags[n] = v), registered: () => handlers };
 }
 
 const GH = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -148,6 +152,135 @@ describe("pi-secret wiring", () => {
     // untouched. Returning { action: "continue" } would be equally valid, but a
     // no-op hook should say nothing at all.
     expect(out?.action).toBeUndefined();
+  });
+
+  // The confirm gate: a capture backed by evidence is silent, one backed only by shape asks.
+  describe("shape-only captures are confirmed before the prompt is rewritten", () => {
+    // Tier-3 fixture: 28 chars, symbol-dense, no keyword anywhere near it.
+    const GUESS = "Xk9#vQ2zLm7$Wr4tYp8nB3sD6fHj";
+
+    function uiWithConfirm(answer: boolean, hasUI = true) {
+      const confirm = vi.fn(async (_title: string, _message: string) => answer);
+      return {
+        ctx: { ...ctx, hasUI, ui: { ...ctx.ui, confirm } } as typeof ctx,
+        confirm,
+      };
+    }
+
+    beforeEach(() => {
+      resetDeclined(); // the decline memory is module state and would leak between tests
+      (ctx.ui.confirm as ReturnType<typeof vi.fn>).mockClear();
+      (ctx.ui.notify as ReturnType<typeof vi.fn>).mockClear();
+    });
+
+    it("never asks for a keyword or provider-format hit", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      await h.fire("input", { text: `deploy with ${GH}`, source: "interactive" }, ctx);
+      expect(ctx.ui.confirm).not.toHaveBeenCalled();
+    });
+
+    it("asks, and applies the rewrite when approved", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(true);
+      const out = (await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c)) as {
+        action: string;
+        text: string;
+      };
+      expect(confirm).toHaveBeenCalledTimes(1);
+      // The dialog shows the REASON, not just the length: the whole point is that the
+      // reader can tell a guess from a fact before it costs anything.
+      const message = String(confirm.mock.calls[0]![1]);
+      expect(message).toContain("no keyword");
+      expect(message).toContain(`len ${GUESS.length}`);
+      expect(message).toContain("sha ");
+      expect(out.action).toBe("transform");
+      expect(out.text).not.toContain(GUESS);
+    });
+
+    it("leaves the text untouched when declined, and says so", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(false);
+      const out = await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c);
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(out).toBeUndefined(); // no transform: the user's sentence is intact
+      expect(vaultForSession("/tmp/s.jsonl").size()).toBe(0);
+      expect(c.ui.notify).toHaveBeenCalledWith(expect.stringContaining("left 1 possible secret"), "warning");
+    });
+
+    it("does not ask again about a declined value in the same session", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(false);
+      await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c);
+      await h.fire("input", { text: `again: ${GUESS}`, source: "interactive" }, c);
+      expect(confirm).toHaveBeenCalledTimes(1);
+    });
+
+    it("forgets declines on a new session, but not on reload", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(false);
+      await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c);
+      expect(declinedCount()).toBe(1);
+      await h.fire("session_start", { reason: "reload" }, ctx);
+      expect(declinedCount()).toBe(1);
+      await h.fire("session_start", { reason: "new" }, ctx);
+      expect(declinedCount()).toBe(0);
+    });
+
+    it("drops the guess without asking when there is no dialog-capable UI", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(true, false);
+      const out = await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(out).toBeUndefined();
+    });
+
+    it("applies the guess without asking when the flag is off", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", false);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(true);
+      const out = (await h.fire("input", { text: `the key is ${GUESS}`, source: "interactive" }, c)) as {
+        text: string;
+      };
+      expect(confirm).not.toHaveBeenCalled();
+      expect(out.text).not.toContain(GUESS);
+    });
+
+    it("still captures the evidenced secret when a guess beside it is declined", async () => {
+      const h = harness();
+      h.setFlag("sec-confirm-guess", true);
+      piSecret(h.pi);
+      await h.fire("session_start", { reason: "startup" }, ctx);
+      const { ctx: c, confirm } = uiWithConfirm(false);
+      const out = (await h.fire("input", { text: `deploy ${GH} and note ${GUESS}`, source: "interactive" }, c)) as {
+        action: string;
+        text: string;
+      };
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(out.action).toBe("transform");
+      expect(out.text).not.toContain(GH);
+      // The declined guess is still in the text, in the clear: that is what "no" means.
+      expect(out.text).toContain(GUESS);
+    });
   });
 
   it("never captures a git SHA from input", async () => {

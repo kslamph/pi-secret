@@ -55,10 +55,21 @@ and that would put it back in the transcript.
   so one command's secret cannot reach another concurrent command.
 - **Round-trip masking.** Values are masked by *equality* — including base64, hex, URL-encoded and
   uppercase-hex forms — and by *shape*: provider prefixes (`ghp_`, `sk-`, `AKIA…`, `xox…`, `glpat-`,
-  `npm_`, `hf_`), PEM blocks, JWTs, and `password=` / `api_key:` / `token:` pairs.
+  `npm_`, `hf_`, Stripe, SendGrid), PEM blocks (including a paste that stopped before the END line),
+  JWTs, and `password=` / `api_key:` / `token:` pairs.
 - **Capture on paste.** Paste a credential into the conversation by accident and it is captured into
   the vault and rewritten to a ref *before* anything is persisted. A receipt line names it — the
   name, length and a masked preview, never the value.
+- **It asks before it guesses.** A capture backed by a provider prefix, a keyword (`password=`,
+  `--token x`, `密码：…`), or a flag is applied silently. One backed only by *shape* — a long
+  random-looking run with no keyword near it — shows a dialog first, listing what it found, how long
+  it is, and its fingerprint, and your text is not touched until you answer. Declining leaves the
+  text exactly as you typed it and is remembered for the session, so the same token does not ask
+  twice. `--sec-confirm-guess=false` restores the older always-capture behaviour. Where there is no
+  dialog to answer with (`pi --print`), a shape-only match is left alone rather than applied
+  unattended.
+- **Chinese prompts work.** 密码 / 口令 / 密钥 / 令牌 / 私钥 are recognised with the forms they actually
+  take in a sentence (是, 为, 设为, 改为, and the full-width colon).
 - **Import from a file.** `/sec add-from-file` reads a `.env` you name, lists what it found, and adds
   the ones you tick. It shows variable *names* only, hides what does not look like a secret (`TAB`
   reveals everything), and reads nothing until you type a path. Your file is never written to.

@@ -347,13 +347,38 @@ export interface CaptureReceipt {
   label: string;
   length: number;
   source: "paste";
+  /**
+   * Why this was captured, when the reason is a judgement rather than a format.
+   *
+   * Absent for a keyword or provider-format hit, where the reason is self-evident from
+   * the name. Present for a shape-only capture, and deliberately so: a receipt that said
+   * only `sec:secret · len 21` is what made the 2026-10-09 over-capture impossible to
+   * diagnose after the fact.
+   */
+  evidence?: string;
+}
+
+/** Which candidates a capture may apply. "evidenced" drops every shape-only guess. */
+export type CaptureScope = "all" | "evidenced";
+
+/**
+ * The shape-only candidates in `text` — everything found on appearance alone.
+ *
+ * Split out from captureFromText because the CONFIRM decision has to be made before
+ * anything is rewritten: the user has to see the guesses and answer before the sentence
+ * they are in is modified, and by then findCandidates has already run.
+ */
+export function findGuesses(text: string) {
+  return findCandidates(text).filter((c) => c.confidence === "entropy");
 }
 
 export function captureFromText(
   text: string,
   vault: Vault,
+  opts: { scope?: CaptureScope } = {},
 ): { text: string; captured: CaptureReceipt[] } {
-  const candidates = findCandidates(text);
+  let candidates = findCandidates(text);
+  if (opts.scope === "evidenced") candidates = candidates.filter((c) => c.confidence !== "entropy");
   if (!candidates.length) return { text, captured: [] };
   let names: string[];
   try {
@@ -378,6 +403,7 @@ export function captureFromText(
         label: entry.preview ?? `sha256:${entry.fingerprint}`,
         length: entry.length,
         source: "paste",
+        evidence: item.candidate.evidence,
       });
     } catch {
       // A name the vault refuses (invalid, or colliding shell variable) must not
