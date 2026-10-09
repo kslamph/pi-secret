@@ -19,7 +19,7 @@ import { fingerprint } from "./refs.ts";
 import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes
