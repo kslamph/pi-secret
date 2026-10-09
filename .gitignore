@@ -1,2 +1,6 @@
 node_modules/
 *.log
+
+# Local-only helper: the canary echo-auth server used by test:canary. Stays on disk,
+# never tracked — it is a scratch auth endpoint, not project code.
+scripts/echo-auth-server.mjs
