@@ -6,7 +6,9 @@ import {
   injectToolCall,
   scrubDeepFailClosed,
   scrubOutputSnapshot,
+  recordReadOrigins,
   scrubToolResult,
+  vaultAdopter,
   type CaptureScope,
 } from "./glue.ts";
 import { bashIsOwnedByPiSecret, registerSecureBash } from "./tools/bash.ts";
@@ -138,6 +140,24 @@ async function decideScope(
   if (approved) return { scope: "all", leftAlone: 0 };
   for (const g of pending) declineValue(g.value);
   return { scope: "evidenced", leftAlone: pending.length };
+}
+
+/**
+ * The adopter for the hooks that see the whole conversation (`context`, the provider
+ * payload). Whatever first lands in the vault from there is announced by name, same as
+ * from tool_result: an adopted credential is the one entry nobody typed. A repeat is
+ * silent, because the adopter reports only names that are new.
+ */
+function announcingAdopter(v: Vault, ctx: ExtensionContext) {
+  return vaultAdopter(v, (name) => {
+    if (!ctx.hasUI) return;
+    try {
+      ctx.ui.notify(`pi-secret: stored sec:${name} from the conversation for this session`, "info");
+      ctx.ui.setStatus("pi-secret", `sec: ${v.size()} active`);
+    } catch {
+      /* a notice is not worth failing the request over */
+    }
+  });
 }
 
 export default function piSecret(pi: ExtensionAPI): void {
@@ -278,7 +298,7 @@ export default function piSecret(pi: ExtensionAPI): void {
       if (warning) ctx.ui.notify(warning.message, "warning");
     }
     if (!isEnabled()) return undefined;
-    const out = injectToolCall(event.toolName, event.input as Record<string, unknown>, vault(ctx));
+    const out = injectToolCall(event.toolName, event.input as Record<string, unknown>, vault(ctx), { cwd: ctx.cwd });
     // §12h: deliberate allows on doc/test targets tell the USER (names only, no
     // values) — same channel and same rule as the redirect warning above.
     if (out.notify && ctx.hasUI) ctx.ui.notify(out.notify, "info");
@@ -288,18 +308,37 @@ export default function piSecret(pi: ExtensionAPI): void {
 
   pi.on("tool_result", async (event, ctx) => {
     const v = vault(ctx);
+    const adopted: string[] = [];
+    // Gated on the switch, unlike the scrub itself: `/sec off` empties the vault on purpose,
+    // and adopting here would quietly refill it. Masking still happens, with the marker.
+    const enabled = isEnabled();
+    const adopt = enabled ? vaultAdopter(v, (name) => adopted.push(name)) : undefined;
     const out = scrubToolResult(
       { toolName: event.toolName, content: event.content as unknown[], details: event.details },
       v,
-      { fileReads: fileReadsEnabled(pi) },
+      { fileReads: fileReadsEnabled(pi), adopt },
     );
     // pi writes an UNSCRUBBED snapshot when bash truncates, and hands the model a
     // path to read it from — rewrite or drop it before the result is persisted.
-    scrubOutputSnapshot(out.details ?? event.details, v);
+    scrubOutputSnapshot(out.details ?? event.details, v, adopt);
+    // After the scrub, so a credential adopted from this read already has a vault entry.
+    if (enabled) try {
+      recordReadOrigins(
+        { toolName: event.toolName, input: event.input as Record<string, unknown>, content: event.content as unknown[] },
+        v,
+        ctx.cwd,
+      );
+    } catch {
+      /* best-effort: without an origin a write-back is refused, which is the old behaviour */
+    }
     if (out.hits && ctx.hasUI) {
       // Never interpolate event.input here: it carries EXPANDED args with real values.
-      ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in ${event.toolName} output`, "info");
+      // Names only, and the user sees them: an adopted credential is the one vault entry
+      // nobody typed, so it is announced rather than appearing silently in /sec list.
+      const stored = adopted.length ? ` — stored as ${adopted.map((n) => `sec:${n}`).join(", ")} for this session` : "";
+      ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in ${event.toolName} output${stored}`, "info");
     }
+    if (adopted.length && ctx.hasUI) ctx.ui.setStatus("pi-secret", `sec: ${v.size()} active`);
     // A screenshot cannot be scrubbed — masking base64 corrupts the image and the
     // provider rejects the request — so image and other binary payloads pass through
     // byte-identical. Saying so is the whole point: a silent pass-through reads as
@@ -319,7 +358,10 @@ export default function piSecret(pi: ExtensionAPI): void {
 
   pi.on("context", async (event, ctx) => {
     if (!isEnabled()) return undefined;
-    const out = scrubDeepFailClosed(event.messages as unknown, vault(ctx), { shapes: true }, (cls) =>
+    // Adopts too: content that reached context without passing tool_result (`!` user bash,
+    // a session from before pi-secret, `sec-file-reads` off) gets usable refs, not the marker.
+    const v = vault(ctx);
+    const out = scrubDeepFailClosed(event.messages as unknown, v, { shapes: true, adopt: announcingAdopter(v, ctx) }, (cls) =>
       ctx.ui.notify(`pi-secret: context scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? { messages: out.value as never } : undefined;
@@ -351,7 +393,8 @@ export default function piSecret(pi: ExtensionAPI): void {
     // provider does not, which is why the canary harness has to inject the callback
     // itself). The durable guarantee is context + message_end + tool_result; this is a
     // provider-dependent extra layer, and `turn_end` below measures whether it exists.
-    const out = scrubDeepFailClosed(event.payload as unknown, vault(ctx), { shapes: true }, (cls) =>
+    const v = vault(ctx);
+    const out = scrubDeepFailClosed(event.payload as unknown, v, { shapes: true, adopt: announcingAdopter(v, ctx) }, (cls) =>
       ctx.ui.notify(`pi-secret: provider payload scrub failed closed (${cls})`, "error"),
     );
     return out.hits ? (out.value as never) : undefined;

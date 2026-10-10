@@ -31,25 +31,33 @@ describe("sec_list", () => {
     expect(joined).toMatch(/[Nn]ever ask the user/);
   });
 
-  it("tells the model what a redaction IS, and what to do instead", async () => {
-    // Added 2026-10-10, driven by a real session: a grep of ~/.bashrc came back masked and
-    // the model spent seven thinking blocks unable to tell a redaction from file content
-    // ("maybe bashrc value is literally the scrub marker"), then hunted for the credential
-    // with od/xxd pipelines — because it was never told what to do INSTEAD. So the
-    // guideline has to carry all three parts: what the marker means, that recovery is a
-    // leak rather than a workaround, and the constructive paths (a ref, or /sec add).
+  it("tells the model what a masked credential IS, and what to do instead", async () => {
+    // Driven by a real session (2026-10-10): a grep of ~/.bashrc came back masked and the
+    // model spent seven thinking blocks unable to tell a redaction from file content, then
+    // hunted for the credential with od/xxd pipelines. Since 2026-10-11 shape matches come
+    // back as usable refs, so the guideline must say: it is not file content, use the ref,
+    // recovery is a leak, and only the marker needs /sec add.
     const joined = (createSecListTool(() => vaultWith()).promptGuidelines ?? []).join("\n");
     expect(joined).toMatch(/not file content/);
+    expect(joined).toMatch(/Use the ref directly/);
     expect(joined).toMatch(/od, xxd, base64, sed/); // names the exact transforms it must not try
-    expect(joined).toMatch(/leak rather than a workaround/);
-    expect(joined).toMatch(/write \{\{sec:NAME\}\}/); // use it without seeing it
-    expect(joined).toMatch(/\/sec add/); // what to do when the value has no name
-    // And the other half: "never recoverable" on its own reads as "don't look", which
-    // either stops the model inspecting a credential file at all or sends it back to od.
+    expect(joined).toMatch(/leaks it/);
+    expect(joined).toMatch(/Only \{\{sec:redacted\}\} is unusable/);
+    expect(joined).toMatch(/\/sec add/);
+    // Prevention: verify and consume without printing.
+    expect(joined).toMatch(/Avoid commands that print credential values/);
+    expect(joined).toMatch(/--password-stdin/);
     // Diagnosis must stay possible, restricted to the FACTS about a value.
     expect(joined).toMatch(/print only its properties/);
     expect(joined).toMatch(/length, prefix class, quoting, trailing whitespace/);
     expect(joined).toMatch(/never the value itself/);
+  });
+
+  it("marks entries adopted from tool output", async () => {
+    const v = vaultWith();
+    v.add("aws_secret_access_key", "wJalrXUtnFEMIK7MDENGbPxRfiCYzzzzzzzz", "output");
+    const r = await createSecListTool(() => v).execute("t", {} as never, undefined, undefined, undefined as never);
+    expect(JSON.stringify(r.content)).toContain("sec:aws_secret_access_key · len 36 · session-only · seen in tool output");
   });
 
   it("warns against the nested-shell expansion trap", async () => {

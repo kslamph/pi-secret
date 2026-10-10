@@ -1055,3 +1055,119 @@ tests red.
 - The carve-out list is convention, not truth: `.example`-suffixed files and `examples/` directories
   are templates by culture. Anything outside it is one deliberate rename away from the old behavior,
   which is the intended friction for genuinely ambiguous targets.
+
+## 12i. A credential in tool output becomes a usable ref, not a redaction (2026-10-11)
+
+Supersedes the last paragraph of §8.2 ("masked shapes with no vault match become `{{sec:redacted}}`
+… the model can't *use* that ref — by design") and the "never recoverable … ask the user to /sec add"
+guideline added 2026-10-10.
+
+### The goal, restated
+
+1. No plaintext secret reaches the endpoint.
+2. pi-secret does not get in the way of the user's or the model's work.
+
+User input already met both. Tool output met (1) and failed (2): an unknown credential in output
+became `{{sec:redacted}}`, which the model can neither use nor tell apart from file content. The
+2026-10-10 session (seven thinking blocks, then `od`/`xxd` to dig the value back out) is that failure:
+the redaction both stalled the work and pushed the model toward the exact transforms that leak.
+
+### The rule
+
+Two layers, in this order.
+
+**Prevent** (guideline on `sec_list`): don't print credentials. Verify without showing
+(`test -n "$T"`, `${#T}`, `gh auth status`, `aws sts get-caller-identity`) and consume without
+echoing (`T=$(gh auth token) cmd`, pipes, `--password-stdin`).
+
+**Cure** (scrubber): when a shape match (§8.2's detectors, unchanged) has no vault entry, the value
+is **adopted** into the session vault under a derived name and replaced by `{{sec:NAME}}`. The model
+reads `AWS_SECRET_ACCESS_KEY={{sec:aws_secret_access_key}}` and can put that ref straight into its
+next command; the endpoint sees no plaintext either way.
+
+- **Names:** the key of a `key=value` match, else the provider hint (`github`, `openai`), else
+  `private_key` / `jwt`. Collisions get `-2`, `-3`. A leading digit gets `s_`; `redacted` is never minted.
+- **Idempotent by value:** a value already in the vault (adopted or user-given) keeps its name, so the
+  tool result, the truncation snapshot and every later `context`/`before_provider_request` pass agree.
+- **Second value pass:** after the shape pass, newly adopted values are masked wherever else they
+  appear in the same text (a bare repeat, its base64/hex). The generic marker could never do that,
+  because it had no value to search for.
+- **Source `output`**, shown in `sec_list` ("seen in tool output") and `/sec list`, and announced to the
+  user by name when first stored. It is the one vault entry nobody typed.
+- **Cap:** `MAX_ADOPTED` (64) per session; past it, the generic marker. Still masked.
+- **Where:** `tool_result` (content, details, snapshot), `context`, `before_provider_request`. Not
+  streamed bash partials. Those reach the user's screen only, and adopting there would swallow the
+  "stored as" notice that `tool_result` gives.
+- **Not while `/sec off`.** That command empties the vault on purpose, so adopting would refill it.
+  Masking still happens, with the marker.
+- `{{sec:redacted}}` remains for the fail-closed path (§11), the cap and `/sec off`.
+
+### Why no confirmation dialog, when input capture asks (§6.2)
+
+Input capture asks because rewriting the user's sentence is unrecoverable: it happens before
+persistence and the original is gone. Adopting from output loses nothing. The value is in the vault,
+a ref expands to the exact original bytes in bash, so even a false positive (a hash behind `token=`)
+only becomes *hidden*, not *destroyed*. A dialog per tool result would be the interruption goal (2)
+forbids.
+
+### Why this adds no capability
+
+The value was in output the model's own command produced; bash could already reach it. Adoption
+changes what the model *reads*, not what it can *do*. That's constraint 3 (§2), now applied to
+the masked form as well.
+
+### The literal-value block (glue `literalSecretNames`) skips adopted entries
+
+That block exists because a model holding a user-given value means a leak upstream. An adopted value
+was only ever shown as a ref, so a model typing it knew it independently. The usual case is AWS's
+documented `AKIAIOSFODNN7EXAMPLE`, adopted from a docs page and later written into a fixture.
+Blocking that would refuse ordinary work over a value that came from the endpoint, not from us.
+
+### Residuals
+
+- Writing a credential file back: see §12j.
+- Transformations (`cut`, `rev`) of a not-yet-adopted value still escape (§12.3). Once a value is
+  adopted, its base64/hex forms no longer do.
+- Detector false positives now land in the vault as entries the user did not choose. They are
+  session-scoped, named, visible in `/sec list`, and removable with `/sec remove`.
+
+## 12j. A ref goes back into the file it was read from (2026-10-11)
+
+Narrows §9's `write`/`edit` hard block, which made `read .env` → `edit .env` impossible once the file
+held a credential, because the model could only quote the ref, and a resolving ref was refused.
+
+### The rule
+
+A resolving ref in `write`/`edit` content is **expanded** when its value was read from the
+target file; otherwise the §9 block stands.
+
+- **Origin** = after a `read` tool result, every vault value whose *literal* bytes appear in the
+  *raw* output (before scrubbing) gets that file's canonical path recorded (`Vault.addOrigin`).
+  Recorded after the scrub, so a credential adopted from that same read (§12i) counts. A file that
+  only *quotes* `{{sec:x}}`, or holds an encoding of the value, is not an origin.
+- **Canonical path**: pi's own resolution (leading `@` stripped, `~` expanded, relative to cwd), plus
+  `realpath` when the file exists, so `./.env`, an absolute path and a symlink are one file.
+- **Only `read`**. Not `bash` (`cat`), not `grep`: deciding which file a shell command or a multi-file
+  search printed is the lexing this project refuses to guess at. A model that `cat`s a file and then
+  edits it gets the old block, which names what to do.
+- **Mixed content**: if any resolving ref lacks the origin, the whole call is refused (as before) and
+  the reason names the refs that *could* go back. Only restorable names are ever expanded; `path`
+  never is.
+- **Doc/test targets** (§12h): a restorable ref is expanded there too. Writing its literal name
+  into a fixture it was read from would corrupt that fixture.
+- The user gets a names-only notify ("wrote sec:x back into .env, the file it was read from").
+
+### Why this keeps both goals
+
+Nothing reaches the endpoint: the expansion happens on the `tool_call` clone (§3), the persisted call
+keeps the ref, and the edit's diff comes back through `tool_result`, where the value pass masks it.
+Nothing new reaches disk: the value goes only to a file that held it at read time. Constraint 2's
+"never materialized into files" is about *new* files, and here the value was already in that one.
+
+### Residuals
+
+- An origin is not revoked if the file later changes. Writing the value back to a file that no
+  longer holds it re-introduces it there, and only there. Accepted: it is the file the user
+  kept it in.
+- With `sec-file-reads` off, the read is not shape-scanned at `tool_result`, so an unknown credential
+  is adopted later (in `context`) without an origin, and the write-back is refused as before.

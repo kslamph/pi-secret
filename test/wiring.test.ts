@@ -338,7 +338,43 @@ describe("pi-secret wiring", () => {
     )) as { content: Array<{ text: string }> };
     expect(JSON.stringify(out.content)).not.toContain(GH);
     expect(out.content[0]?.text).toContain("{{sec:gh_pat}}");
-    expect(out.content[0]?.text).toContain("{{sec:redacted}}");
+    // An unknown credential is ADOPTED: stored for the session and shown as a usable ref.
+    expect(out.content[0]?.text).toContain("{{sec:aws_access_key_id}}");
+    expect(vaultForSession("/tmp/s.jsonl").get("aws_access_key_id")?.source).toBe("output");
+  });
+
+  it("adopts in the context hook too, for content that never passed tool_result", async () => {
+    const h = harness();
+    piSecret(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    dropSessionVault("/tmp/s.jsonl");
+    const secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYqq8xzz9k";
+    const out = (await h.fire(
+      "context",
+      { messages: [{ role: "toolResult", content: [{ type: "text", text: `DB_PASSWORD=${secret}` }] }] },
+      ctx,
+    )) as { messages: unknown[] };
+    expect(JSON.stringify(out.messages)).toContain("DB_PASSWORD={{sec:db_password}}");
+    expect(vaultForSession("/tmp/s.jsonl").resolve("db_password")).toBe(secret);
+  });
+
+  it("does not adopt while pi-secret is off, but still masks", async () => {
+    const h = harness();
+    piSecret(h.pi);
+    setActiveScopeKey("/tmp/s.jsonl");
+    dropSessionVault("/tmp/s.jsonl");
+    setEnabled(false);
+    try {
+      const out = (await h.fire(
+        "tool_result",
+        { toolName: "bash", toolCallId: "c1", input: {}, content: [{ type: "text", text: "AKIAABCDEFGHIJKLMNOP" }] },
+        ctx,
+      )) as { content: Array<{ text: string }> };
+      expect(out.content[0]?.text).toBe("{{sec:redacted}}");
+      expect(vaultForSession("/tmp/s.jsonl").size()).toBe(0);
+    } finally {
+      setEnabled(true);
+    }
   });
 
   it("never echoes tool_result input into an error", async () => {

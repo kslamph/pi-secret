@@ -1,10 +1,12 @@
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import type { Vault } from "./vault.ts";
 import { bashRefIssues, expandBash, expandRefs, findRefs } from "./substitute.ts";
-import { redactAllText, scrubDeep, scrubText } from "./scrub.ts";
+import { redactAllText, scrubDeep, scrubText, type ShapeAdopter, type ShapeHit } from "./scrub.ts";
 import { applyCapture, findCandidates, suggestNames, type CapturedItem } from "./capture.ts";
 
-import { MIN_SCRUBABLE_LENGTH, RESERVED_NAME } from "./refs.ts";
+import { MIN_SCRUBABLE_LENGTH, RESERVED_NAME, isValidName } from "./refs.ts";
 
 const BLOCKED_IN_PATH = new Set(["read", "grep", "find", "ls"]);
 const PRESERVED_DETAIL_KEYS: ReadonlySet<string> = new Set(["fullOutputPath"]);
@@ -46,6 +48,50 @@ export function isDocPath(path: string): boolean {
   // Whole path segments only: `mydocs/x.env` and `testing/x` stay real targets,
   // because the segment must be bounded by start-or-slash on both sides.
   return DOC_SEGMENT_RE.test(path) || DOC_SUFFIX_RE.test(path);
+}
+
+/**
+ * The path a file tool will actually touch, in one canonical form, so a `read` origin and a
+ * later `write` target compare equal however the model spelled them. Mirrors pi's own
+ * resolveToCwd (leading `@` stripped, `~` expanded, relative to cwd) and then follows
+ * symlinks when the file exists, so `./.env` and a symlink to it are one file.
+ */
+export function canonicalPath(path: string, cwd: string): string {
+  let p = path.startsWith("@") ? path.slice(1) : path;
+  if (p === "~") p = homedir();
+  else if (p.startsWith("~/")) p = homedir() + p.slice(1);
+  const abs = resolvePath(cwd, p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
+
+/**
+ * After a `read`, remember which vaulted values that file really contains (spec §12j).
+ *
+ * Checked against the RAW tool output, before scrubbing, and only for the literal value: a
+ * file that merely quotes `{{sec:x}}` as text, or holds an encoding of it, does not count,
+ * because expanding a ref there would put the value somewhere it never was. Call it after
+ * scrubbing, so a credential adopted from this same read is already in the vault.
+ */
+export function recordReadOrigins(
+  event: { toolName: string; input: Record<string, unknown>; content: unknown[] },
+  vault: Vault,
+  cwd: string,
+): void {
+  if (event.toolName !== "read" || typeof event.input.path !== "string") return;
+  const raw = event.content
+    .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
+    .join("\n");
+  if (!raw) return;
+  const target = canonicalPath(event.input.path, cwd);
+  for (const value of vault.values()) {
+    if (value.length < MIN_SCRUBABLE_LENGTH || !raw.includes(value)) continue;
+    const name = vault.findByValue(value)?.name;
+    if (name) vault.addOrigin(name, target);
+  }
 }
 
 interface RefHit {
@@ -126,13 +172,23 @@ function literalSecretNames(vault: Vault, input: Record<string, unknown>): strin
   for (const value of vault.values()) {
     if (value.length < MIN_SCRUBABLE_LENGTH) continue;
     if (!serialized.includes(value)) continue;
-    const name = vault.findByValue(value)?.name;
-    if (name && !names.includes(name)) names.push(name);
+    const entry = vault.findByValue(value);
+    // An adopted value was only ever shown to the model as a ref. If the model types it
+    // anyway, it knew it already (AWS's documented `AKIAIOSFODNN7EXAMPLE` is the usual
+    // case, adopted from a docs page and then written into a test fixture). Blocking that
+    // would refuse ordinary work over a value that came from the endpoint, not from us.
+    if (!entry || entry.source === "output") continue;
+    if (!names.includes(entry.name)) names.push(entry.name);
   }
   return names;
 }
 
-export function injectToolCall(toolName: string, input: Record<string, unknown>, vault: Vault): InjectOutcome {
+export function injectToolCall(
+  toolName: string,
+  input: Record<string, unknown>,
+  vault: Vault,
+  opts: { cwd?: string } = {},
+): InjectOutcome {
   const literals = literalSecretNames(vault, input);
   if (literals.length) {
     return {
@@ -176,7 +232,17 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
     );
     const refs = findRefs(contentOnly ?? "");
     if (refs.length) {
-      if (isDocPath(path)) {
+      const doc = isDocPath(path);
+      const resolving = refs.filter((r) => vault.has(r.name));
+      // §12j: a ref whose value was READ from this very file may be written back to it.
+      // That is what makes `read .env` → `edit .env` work when the file holds credentials:
+      // the value goes back where it was and nowhere else, so nothing new lands on disk.
+      const target = opts.cwd && path ? canonicalPath(path, opts.cwd) : undefined;
+      const restorable = new Set(
+        target ? resolving.filter((r) => vault.hasOrigin(r.name, target)).map((r) => r.name) : [],
+      );
+      const stranded = [...new Set(resolving.filter((r) => !restorable.has(r.name)).map((r) => r.name))];
+      if (doc && !restorable.size) {
         const n = refs.length;
         return {
           expanded: [],
@@ -186,13 +252,15 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
             "documentation/test target: names only, no values were substituted.",
         };
       }
-      const resolving = refs.filter((r) => vault.has(r.name));
-      if (resolving.length) {
+      if (stranded.length && !doc) {
         return {
           blocked: {
             reason:
               FILE_WRITE_REASON +
-              ` (sec:${resolving.map((r) => r.name).join(", ")} resolves in this session's vault)`,
+              ` (sec:${stranded.join(", ")} resolves in this session's vault)` +
+              (restorable.size
+                ? ` Only a ref read from this same file can be written back to it (sec:${[...restorable].join(", ")} can).`
+                : ""),
           },
           expanded: [],
           env: {},
@@ -203,7 +271,7 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
       // its way into a file. The canary for this is a shape-masked token read
       // back from a tool result and dutifully persisted. Documentation may quote
       // the marker (the spec does); anything else may not.
-      if (refs.some((r) => r.name === RESERVED_NAME)) {
+      if (!doc && refs.some((r) => r.name === RESERVED_NAME)) {
         return {
           blocked: {
             reason:
@@ -214,6 +282,33 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
           },
           expanded: [],
           env: {},
+        };
+      }
+      if (restorable.size) {
+        // Expand ONLY the restorable names, and never in `path`. Anything else stays literal:
+        // non-resolving prose, and (in a doc target) a stranded name, exactly as before.
+        const expanded: string[] = [];
+        const resolveRestorable = (name: string): string | undefined =>
+          restorable.has(name) ? vault.resolve(name) : undefined;
+        for (const [key, value] of Object.entries(input)) {
+          if (key === "path") continue;
+          if (typeof value === "string") {
+            const next = expandRefs(value, resolveRestorable);
+            input[key] = next.text;
+            for (const n of next.used) if (!expanded.includes(n)) expanded.push(n);
+            continue;
+          }
+          for (const hit of deepFindRefs(value)) {
+            const slot = (hit.container as Record<string | number, unknown>)[hit.key] as string;
+            const next = expandRefs(slot, resolveRestorable);
+            (hit.container as Record<string | number, unknown>)[hit.key] = next.text;
+            for (const n of next.used) if (!expanded.includes(n)) expanded.push(n);
+          }
+        }
+        return {
+          expanded,
+          env: {},
+          notify: `pi-secret: wrote sec:${expanded.join(", ")} back into ${path}, the file ${expanded.length === 1 ? "it was" : "they were"} read from`,
         };
       }
       // Non-resolving prose in a non-doc target: quoting syntax nobody stores.
@@ -236,6 +331,54 @@ export function injectToolCall(toolName: string, input: Record<string, unknown>,
   return { expanded, env: {} };
 }
 
+/**
+ * The most credentials one session will adopt from output. Past it, a shape match falls back
+ * to the generic marker, so a huge dump of keys cannot grow the vault (and the per-string value
+ * pass, which scales with vault size) without bound. Still masked either way.
+ */
+export const MAX_ADOPTED = 64;
+
+function adoptedName(hit: ShapeHit, taken: ReadonlySet<string>): string | undefined {
+  const raw =
+    hit.kind === "kv" ? hit.key : hit.kind === "provider" ? hit.hint : hit.kind === "pem" ? "private_key" : "jwt";
+  let base = (raw ?? "secret").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 56);
+  if (!base) base = "secret";
+  if (!/^[a-z]/.test(base)) base = `s_${base}`;
+  if (base === RESERVED_NAME) base = "secret";
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (isValidName(name) && !taken.has(name)) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The adopter every scrub path with a vault uses (see ScrubOptions.adopt).
+ *
+ * Idempotent by value: a value already in the vault, whoever put it there, keeps its name, so
+ * the streaming display, the final tool result, the snapshot file and every later `context`
+ * pass all agree on one ref. `onAdopt` is told only about names that are NEW, which is what
+ * the caller announces to the user.
+ */
+export function vaultAdopter(vault: Vault, onAdopt?: (name: string) => void): ShapeAdopter {
+  return (hit) => {
+    const existing = vault.findByValue(hit.value);
+    if (existing) return existing.name;
+    if (vault.entries().filter((e) => e.source === "output").length >= MAX_ADOPTED) return undefined;
+    const name = adoptedName(hit, new Set(vault.names()));
+    if (name === undefined) return undefined;
+    try {
+      vault.add(name, hit.value, "output");
+    } catch {
+      // Refused (shell-variable collision, oversize). Masked with the marker instead: the
+      // one thing this must never do is leave the value visible.
+      return undefined;
+    }
+    onAdopt?.(name);
+    return name;
+  };
+}
+
 export interface ScrubOutcome {
   content: unknown[];
   details?: unknown;
@@ -251,20 +394,20 @@ export interface ScrubOutcome {
 export function scrubToolResult(
   event: { toolName: string; content: unknown[]; details?: unknown },
   vault: Vault,
-  opts: { fileReads: boolean },
+  opts: { fileReads: boolean; adopt?: ShapeAdopter },
 ): ScrubOutcome {
   // Shape masking stays off for read/grep/find/ls unless the caller enabled it for
   // file reads — a source file containing `password=` would otherwise be corrupted.
   // Value-exact masking always applies.
   const applyShapes = opts.fileReads || !/^(?:read|grep|find|ls)$/.test(event.toolName);
   try {
-    const content = scrubDeep(event.content, vault, { shapes: applyShapes });
+    const content = scrubDeep(event.content, vault, { shapes: applyShapes, adopt: opts.adopt });
     // fullOutputPath is a POINTER, not model-facing text: masking it would strand the
     // unsanitised snapshot on disk (see ScrubOptions.preserveKeys).
     const details =
       event.details === undefined
         ? undefined
-        : scrubDeep(event.details, vault, { shapes: applyShapes, preserveKeys: PRESERVED_DETAIL_KEYS });
+        : scrubDeep(event.details, vault, { shapes: applyShapes, preserveKeys: PRESERVED_DETAIL_KEYS, adopt: opts.adopt });
     return {
       content: content.value as unknown[],
       details: details?.value,
@@ -312,7 +455,7 @@ export function scrubMessageText(text: string, vault: Vault, opts: { shapes: boo
 export function scrubDeepFailClosed<T>(
   value: T,
   vault: Vault,
-  opts: { shapes: boolean },
+  opts: { shapes: boolean; adopt?: ShapeAdopter },
   onError?: (errorClass: string) => void,
 ): { value: T; hits: number } {
   try {
@@ -330,14 +473,14 @@ export function scrubDeepFailClosed<T>(
  * file scrubbed in place; on ANY failure unlink it and DELETE the pointer — a stale
  * pointer to content we could not clean is worse than no pointer.
  */
-export function scrubOutputSnapshot(details: unknown, vault: Vault): void {
+export function scrubOutputSnapshot(details: unknown, vault: Vault, adopt?: ShapeAdopter): void {
   if (!details || typeof details !== "object") return;
   const record = details as Record<string, unknown>;
   const path = record.fullOutputPath;
   if (typeof path !== "string" || !path) return;
   try {
     const raw = readFileSync(path, "utf8");
-    const scrubbed = scrubText(raw, vault, { shapes: true }).text;
+    const scrubbed = scrubText(raw, vault, { shapes: true, adopt }).text;
     writeFileSync(path, scrubbed);
   } catch {
     try {

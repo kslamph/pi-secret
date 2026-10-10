@@ -2,7 +2,12 @@ import { MAX_REF_BYTES, envVarName, findEnvVarCollision, fingerprint, isValidNam
 import { maskPreview } from "./preview.ts";
 
 export type SecretTier = "session" | "ambient";
-export type SecretSource = "prompt" | "paste" | "file";
+/**
+ * Where a value came from. `output` is a credential pi-secret found in a tool's OUTPUT and
+ * stored itself so the model could keep using it as a ref (see ScrubOptions.adopt). It is
+ * the one source nobody typed or approved, which is why it is told apart in every listing.
+ */
+export type SecretSource = "prompt" | "paste" | "file" | "output";
 
 export interface VaultEntry {
   name: string;
@@ -23,6 +28,12 @@ export interface VaultEntry {
    * src/preview.ts is what keeps that bounded, and short values keep the digest instead.
    */
   preview?: string;
+  /**
+   * Canonical paths of files this exact value was READ from (the `read` tool's raw output
+   * contained it). The one place a ref may be expanded into a `write`/`edit`: putting a value
+   * back into the file it came from puts nothing on disk that was not already there.
+   */
+  origins?: readonly string[];
 }
 
 /** Debug-safe projection: hasOwnProperty("value") must be false. */
@@ -111,6 +122,14 @@ export class Vault {
   }
   resolve(name: string): string | undefined {
     return this.#map.get(name)?.value;
+  }
+  addOrigin(name: string, path: string): void {
+    const entry = this.#map.get(name);
+    if (!entry || entry.origins?.includes(path)) return;
+    this.#map.set(name, { ...entry, origins: [...(entry.origins ?? []), path] });
+  }
+  hasOrigin(name: string, path: string): boolean {
+    return this.#map.get(name)?.origins?.includes(path) ?? false;
   }
   remove(name: string): boolean {
     return this.#map.delete(name);

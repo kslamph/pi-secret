@@ -1,5 +1,6 @@
 import { MIN_SCRUBABLE_LENGTH, derivedForms, RESERVED_NAME } from "./refs.ts";
 import {
+  PROVIDER_PREFIXES,
   PROVIDER_PREFIX_SOURCES,
   SENSITIVE_NAME_SOURCE,
   isDigestShaped,
@@ -28,7 +29,35 @@ export interface ScrubOptions {
    * pointer converts a leak into an invisible one.
    */
   preserveKeys?: ReadonlySet<string>;
+  /**
+   * Turns a shape match into a USABLE ref instead of the generic marker.
+   *
+   * Without it a credential that shows up in tool output and is not in the vault becomes
+   * `{{sec:redacted}}`. The endpoint never sees it, but the model is stuck: it cannot use
+   * the value, and the only way to "get it back" (od, xxd, slicing) is a leak. A session on
+   * 2026-10-10 spent seven thinking blocks doing exactly that. With an adopter the value
+   * goes into the session vault and the model reads `{{sec:aws_secret_access_key}}`, which
+   * it can put straight into its next command. The endpoint still sees no plaintext.
+   *
+   * This gives the model no capability it did not already have. The value was in output
+   * the model's own command produced, so bash could reach it anyway.
+   *
+   * Return undefined to fall back to the generic marker (cap reached, name refused).
+   */
+  adopt?: ShapeAdopter;
 }
+
+/** One shape match the scrubber is about to mask, with whatever names it. */
+export interface ShapeHit {
+  value: string;
+  kind: "kv" | "provider" | "jwt" | "pem";
+  /** The key on the left of a `key=value` / `key: value` match (`AWS_SECRET_ACCESS_KEY`). */
+  key?: string;
+  /** The provider table's hint for a provider-format match (`github`, `openai`). */
+  hint?: string;
+}
+
+export type ShapeAdopter = (hit: ShapeHit) => string | undefined;
 
 /** Result of a scrub pass over a string. */
 export interface ScrubResult {
@@ -383,8 +412,23 @@ function existingRefSpans(text: string): Array<[number, number]> {
   return spans;
 }
 
-export function maskShapes(text: string): ScrubResult {
+const PROVIDER_ANCHORED = PROVIDER_PREFIXES.map((p) => ({ re: new RegExp(`^(?:${p.source})$`), hint: p.hint }));
+const KV_KEY_RE = /([A-Za-z0-9_\-]+)["']?\s*[=:]\s*["']?$/;
+
+function describeHit(match: string, captured: string | undefined): ShapeHit {
+  if (captured !== undefined) {
+    const key = KV_KEY_RE.exec(match.slice(0, match.length - captured.length))?.[1];
+    return { value: captured, kind: "kv", key };
+  }
+  if (match.startsWith("-----BEGIN")) return { value: match, kind: "pem" };
+  const provider = PROVIDER_ANCHORED.find((p) => p.re.test(match));
+  if (provider) return { value: match, kind: "provider", hint: provider.hint };
+  return { value: match, kind: "jwt" };
+}
+
+export function maskShapes(text: string, adopt?: ShapeAdopter): ScrubResult & { adopted: string[] } {
   const refSpans = existingRefSpans(text);
+  const adopted: string[] = [];
   let hits = 0;
   const out = text.replace(SHAPE_RE, (match: string, ...rest: unknown[]) => {
     // `rest` is [capture?, offset, string]; the offset is what decides whether this
@@ -419,9 +463,17 @@ export function maskShapes(text: string): ScrubResult {
       if (isPlaceholderValue(target)) return match;
     }
     hits++;
-    return captured ? match.slice(0, match.length - captured.length) + GENERIC : GENERIC;
+    let token = GENERIC;
+    if (adopt) {
+      const name = adopt(describeHit(match, captured));
+      if (name !== undefined) {
+        token = `{{sec:${name}}}`;
+        if (!adopted.includes(target)) adopted.push(target);
+      }
+    }
+    return captured ? match.slice(0, match.length - captured.length) + token : token;
   });
-  return { text: out, hits };
+  return { text: out, hits, adopted };
 }
 
 export function scrubText(text: string, vault: SecretProvider, opts: ScrubOptions = {}): ScrubResult {
@@ -432,21 +484,30 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
   // Name-exact pass first: a vault value masks to its own ref so the model can reuse it.
   // Shares maskForms with maskValues (Req 9/10/12/13) so the two passes cannot drift
   // apart — one buffer, one dedup, one application loop.
-  const valueForms = collectForms(vault.values(), (value) => {
+  const tokenFor = (value: string): string => {
     const name = vault.findByValue(value)?.name;
     return name ? `{{sec:${name}}}` : GENERIC;
-  });
-  const r = maskForms(out, valueForms);
+  };
+  const r = maskForms(out, collectForms(vault.values(), tokenFor));
   if (r.hits) {
     out = r.text;
     hits += r.hits;
   }
 
   if (opts.shapes !== false) {
-    const shapes = maskShapes(out);
+    const shapes = maskShapes(out, opts.adopt);
     if (shapes.hits) {
       out = shapes.text;
       hits += shapes.hits;
+    }
+    // A value adopted just now may ALSO appear where no shape fires: `TOKEN=abc…` on one
+    // line and a bare `abc…` (or its base64) on the next. The shape pass only masked the
+    // first. A second value pass over the newly vaulted values covers the rest, which the
+    // generic marker never could, because it had no value to search for.
+    if (shapes.adopted.length) {
+      const again = maskForms(out, collectForms(shapes.adopted, tokenFor));
+      out = again.text;
+      hits += again.hits;
     }
   }
   return { text: out, hits };

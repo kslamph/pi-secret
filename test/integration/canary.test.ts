@@ -96,7 +96,73 @@ describe("canary sweep", () => {
     const text = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
     expect(text).not.toContain(AMBIENT);
     expect(text).not.toContain(AMBIENT_SECRET);
-    expect(text).toContain("{{sec:redacted}}");
+    // Adopted, not redacted: the model can keep using what it read.
+    expect(text).toContain("AWS_ACCESS_KEY_ID={{sec:aws_access_key_id}}");
+    expect(text).toContain("AWS_SECRET_ACCESS_KEY={{sec:aws_secret_access_key}}");
+  });
+
+  it("a credential adopted from output works as a ref in the next command", async () => {
+    // The whole point of adopting: the model never sees the value, and still loses nothing.
+    // It reads the file, gets refs back, and the ref delivers the real value to the child.
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    writeFileSync(join(cwd, "creds.env"), `AWS_SECRET_ACCESS_KEY=${AMBIENT_SECRET}\n`);
+    const harness = await makeSecureSession({
+      cwd,
+      responses: [
+        fauxAssistantMessage([fauxToolCall("bash", { command: "cat creds.env" })]),
+        fauxAssistantMessage([
+          fauxToolCall("bash", {
+            command: '[ "{{sec:aws_secret_access_key}}" = "$(cut -d= -f2 creds.env)" ] && echo ROUNDTRIP-OK',
+          }),
+        ]),
+        fauxAssistantMessage("done"),
+      ],
+    });
+    teardown.push(() => harness.dispose());
+    setActiveScopeKey(harness.sessionFile() ?? "ephemeral");
+
+    await harness.session.prompt("check the key works");
+
+    const text = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    expect(text).not.toContain(AMBIENT_SECRET);
+    expect(text).toContain("ROUNDTRIP-OK");
+  });
+
+  it("read then edit of a credential file writes the real value back, and only there", async () => {
+    // §12j end to end: the model reads .env (sees refs), edits it by quoting a ref in
+    // oldText/newText, and the file on disk keeps its real credential. The transcript and
+    // the provider never see the value.
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    writeFileSync(join(cwd, "creds.env"), `AWS_SECRET_ACCESS_KEY=${AMBIENT_SECRET}\n`);
+    const harness = await makeSecureSession({
+      cwd,
+      responses: [
+        fauxAssistantMessage([fauxToolCall("read", { path: "creds.env" })]),
+        fauxAssistantMessage([
+          fauxToolCall("edit", {
+            path: "creds.env",
+            edits: [
+              {
+                oldText: "AWS_SECRET_ACCESS_KEY={{sec:aws_secret_access_key}}\n",
+                newText: "AWS_SECRET_ACCESS_KEY={{sec:aws_secret_access_key}}\nAWS_REGION=eu-west-1\n",
+              },
+            ],
+          }),
+        ]),
+        fauxAssistantMessage("done"),
+      ],
+    });
+    teardown.push(() => harness.dispose());
+    setActiveScopeKey(harness.sessionFile() ?? "ephemeral");
+
+    await harness.session.prompt("add a region to creds.env");
+
+    expect(readFileSync(join(cwd, "creds.env"), "utf8")).toBe(
+      `AWS_SECRET_ACCESS_KEY=${AMBIENT_SECRET}\nAWS_REGION=eu-west-1\n`,
+    );
+    const text = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    expect(text).not.toContain(AMBIENT_SECRET);
+    expect(text).toContain("{{sec:aws_secret_access_key}}");
   });
 
   it("the model can reuse a masked ref it read back", async () => {
