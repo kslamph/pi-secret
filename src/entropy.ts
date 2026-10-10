@@ -190,6 +190,22 @@ const PLACEHOLDER_VALUE_RE = new RegExp(
   "i",
 );
 
+/**
+ * The PREFIX arm of looksLikeSecretReference, on its own.
+ *
+ * Exported for the scrub path, which needs a narrower rule than `looksLikeSecretReference`
+ * gives: that predicate also vetoes a dotted token (DOTTED_REF_RE), and a JWT is dotted
+ * base64url - so using it in scrub.ts unmasked every `token: eyJ...` pair. The prefix arm is
+ * what actually marks "reads a secret from somewhere": `$VAR`, `%VAR%`, `os.environ[...]`,
+ * `process.env.X`, `config.x`, `getpass(...)`. Those never describe the secret itself.
+ *
+ * Exists to leave vendor documentation alone. Measured on 2026-10-10: a `api_key=` example
+ * and an `apiKey:` example were both rewritten to the redaction marker.
+ */
+export function hasSecretReferencePrefix(value: string): boolean {
+  return REFERENCE_PREFIX_RE.test(value.trim());
+}
+
 export function isPlaceholderValue(value: string): boolean {
   const v = value.trim();
   return v.length === 0 || PLACEHOLDER_VALUE_RE.test(v);

@@ -69,6 +69,10 @@ proceed if a check fails.
 | The `context` hook is wired only via the agent's `transformContext` | `sdk.js:227-231` | It is **not** on the compaction path. |
 | Compaction/branch summarization bypasses `context` | `branch-summarization.js:224-226` | Write-time scrubbing is load-bearing, not defense-in-depth. |
 | `ctx.ui.input()` has no masked mode | `extensions/types.d.ts:74` | Masked entry requires a `ctx.ui.custom()` component. |
+| `addAutocompleteProvider` is a **wrapper**, not a registration | `extensions/types.d.ts:62` (`AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider`); pi composes `provider = factory(provider)` from its built-in command/file provider | A factory that ignores `current` does not *add* completion, it **replaces** the chain: `/`-commands, `@`-files and Tab completion all answer `null`. Measured from the field as "the Tab key is broken while this extension is loaded". |
+| The stock file-completion provider refuses **absolute** paths | `pi-tui` `autocomplete.js`: `if (!options.force && textBeforeCursor.startsWith("/"))` → command branch. Measured: `"/home/kslam/.pi"` → `null`, `"./node_modules/@earendil"` → 1 item | A path picker cannot reuse `CombinedAutocompleteProvider` for `/…` or `~/…` input — a leading `/` means *slash command*, so dotfiles named absolutely complete to nothing. |
+| The kitty keyboard protocol changes the bytes a component receives | `pi-tui` `terminal.js` (protocol negotiation + `StdinBuffer`), `keys.js` (`matchesKey`) | `esc`, `ctrl+c`, `enter` and the arrows arrive as CSI-u (`\x1b[27u`, `\x1b[99;5u`, `\x1b[13u`) or as CSI with `:` parameters (`\x1b[1;1:1A`). Raw byte surgery misses the key **and** types its digits into the buffer. Use `matchesKey`. |
+| `custom()` without `overlay` renders in the editor container, like the built-in dialogs | `interactive-mode` `showExtensionInput` (editor-container path) vs `showExtensionCustom`; `overlay: true` centres a transparent panel over the scrollback | A prompt that passes `overlay: true` collides with the context block above it instead of sitting where the built-in `input`/`select` dialogs sit. |
 
 **Hazard:** `tool_result` handlers receive `input: args` — the **mutated** clone, which
 *does* contain real values. Nothing may interpolate `event.input` into an error string
@@ -206,6 +210,14 @@ one: restore is a user command path, not something the model can invoke.
 (constraints 3 + §1). pi-secure holds *only* what you give it this session. A secret
 that also lives in `process.env` remains reachable as `$NAME`; adopting it is a
 user-side act (stop exporting it, then `/sec add`).
+
+**Amended 2026-10-08 — one exception, and why it is not the same thing.** The intent above was
+to refuse **ambient** sources: values that become spendable without the user doing anything in
+this session. A user-initiated *"read the file I just named, show me its variables, let me tick
+the ones to add"* is not ambient — the user names the file, chooses the keys, and nothing is read
+until they type a path. §12g specifies it, including the structural rule that keeps it
+non-ambient. What stays out: env passthrough, `op read`/keychain/command sources, and any
+automatic adoption, watching, or remembering of a file across sessions.
 
 ## 7. Lifetime
 
@@ -468,6 +480,578 @@ Suggested build order, each step independently shippable and testable:
 
 ## 15. Deliberately deferred
 
-`!` user-bash capture · file/keychain/command sources · host-bound refs ·
-`/sec export` to a file with an explicit warning · Windows `powershell` wrapper ·
-multi-session vault scoping · automatic clipboard clearing after restore.
+`!` user-bash capture · keychain/command sources (`.env` import is now in, §12g) · env
+passthrough itself · automatic file adoption, watching or cross-session memory ·
+host-bound refs · `/sec export` to a file with an explicit warning · Windows `powershell`
+wrapper · multi-session vault scoping · automatic clipboard clearing after restore.
+
+## 12a. Additions from the 2026-10-08 review (three reviewer lanes, all findings adjudicated)
+
+Recorded here rather than in code comments because each is a decision, not an accident.
+
+1. **The shape pass must never mask the interior of an existing `{{sec:…}}`.** Closed.
+   It used to be protected only by a `(?!\{\{sec:)` lookahead inside the KV alternative of
+   `SHAPE_RE`, so `PREFIX_RE`/`JWT_RE`/`PEM_RE` could still match a ref's own name. A
+   secret named `sk-aaaa…` (reachable from `/sec add`) round-tripped to
+   `{{sec:{{sec:redacted}}}}`: stable, idempotent, and the name the model needs was gone.
+   `maskShapes` now skips any match overlapping an existing ref span — a span check rather
+   than one lookahead per branch, because the prefix family has a dozen branches and a
+   guard inside one of them silently stops applying to the other eleven.
+2. **`details.fullOutputPath` is not model-facing text and must not be masked.** Closed.
+   Masking the pointer made `scrubOutputSnapshot` fail its rewrite, and its fail-closed
+   branch then deleted the pointer — correct for the model, but it left the *unsanitised*
+   snapshot on disk with nothing pointing at it. `ScrubOptions.preserveKeys` exists for this.
+3. **`/sec off` semantics are now exact, and the asymmetry is deliberate.** Injection and
+   capture follow the switch; `tool_result` scrubbing does not. A bash command containing
+   a ref is REFUSED while disabled rather than run with a literal placeholder, because
+   `curl -H "Bearer {{sec:gh}}"` would send a bogus header and report success — the
+   false-confidence class §1 treats as the worst outcome here.
+4. **Accepted, not fixed: `scrubDeep` walks every string leaf of a tool result, including
+   an `ImageContent` base64 payload.** The streaming path (`scrubPartial` in
+   `tools/bash.ts`) explicitly skips non-text blocks, so the two disagree. A 24-char
+   window coincidence inside image bytes is not credible, so the only cost is CPU on
+   image-heavy results and a small inconsistency. Recorded rather than fixed because the
+   fix is a per-block type check in the generic walker, which would need the walker to
+   know about pi's content-block schema.
+5. **Bash ownership is decided by real path identity** (`sourceInfo.baseDir` compared
+   against this module's own package directory from `import.meta.url`), not a `/pi-secure/`
+   substring. A relocated install matches because both sides move together; a different
+   extension whose path contains the substring does not, which is the direction that
+   matters, since a false positive suppresses the only warning that a rival extension
+   took `bash` from us.
+6. **Every extension hook must fail CLOSED.** `scrubToolResult` always did; `context`,
+   `message_end` and `before_provider_request` did not, and that mattered more than it
+   looks: pi's ExtensionRunner wraps every handler in try/catch, calls `emitError`, and
+   returns the value it held BEFORE the failing handler ran. An exception there is not a
+   crash — it is scrubbing silently skipped on the persisted assistant message and on the
+   bytes handed to the provider. `scrubDeep` also no longer recurses (measured: the
+   recursive walk died at ~5000 levels with `RangeError`, reachable from a deeply nested
+   model-authored tool-call argument), and the three hooks go through `scrubDeepFailClosed`,
+   whose fallback over-redacts every string leaf.
+7. **A gate that examined nothing has not passed.** `scripts/canary-sweep.mjs` defaulted
+   `SWEEP_ROOTS` to `${cwd}/.pi/sessions`, a directory nothing in this repo writes to —
+   the integration suite puts every session under `mkdtempSync(tmpdir(), "pi-secure-sessions-")`
+   and pi's truncation snapshots are `tmpdir()/pi-bash*`. With `walk()` swallowing a missing
+   directory, it printed "canary sweep clean across 1 roots" and exited 0 whether or not
+   scrubbing worked. It now defaults to the locations that are actually written, handles
+   file roots as well as directories, and **exits 2 when it examined zero files**. That last
+   clause is the generalisable rule: a safety gate must be unable to report success by
+   inspecting nothing.
+
+### Refuted during adjudication
+
+- *"`DELIM_STOP` omits `#`, so `<<EOF#comment` may misparse."* Measured against
+  `/bin/bash`: bash reads the delimiter as the whole word `EOF#comment` and a
+  `EOF#comment` terminator line matches it. Our stop set agrees with bash, so there is
+  nothing to fix.
+
+## 12b. The two §13 blind spots, closed 2026-10-08 (and what closing them revealed)
+
+§13.4 named `/resume` and §3 named the compaction path as bypasses; neither had a
+scenario. Adding them found a Critical and a defect in the gate itself.
+
+8. **(Closed) A compaction summary was persisted with secrets in the clear.**
+   `sessionManager.appendCompaction()` writes a `type: "compaction"` entry straight to
+   the session JSONL. The summary is model-authored, and it is the ONLY model-authored text
+   that never passes through `message_end` — so nothing in this extension saw it before it
+   reached disk. Measured: a summary that repeated a vaulted value wrote it verbatim, and it
+   survived every later turn, `/export` and `/resume`. This is precisely the case §3's
+   "write-time scrubbing is load-bearing, not defense-in-depth" argument claimed to cover,
+   and it did not cover it: the `context` hook is bypassed on this path by design
+   (`branch-summarization.js:224-226`).
+   `scrubCompactionSummaryFile` amends that one JSONL line, and only when `hits > 0`.
+   Original bytes are held in memory, the rewrite goes to a temp file and is renamed over
+   the target (`appendFileSync(path)` reopens by path, so the inode swap is safe), and the
+   result is re-read and verified against the entry count, restoring the original on any
+   failure. A half-written session file is worse than a leaky one.
+   **Residual, accepted:** `agent.state.messages` keeps the unscrubbed summary for the rest
+   of the process, because pi rebuilds it before `session_compact` is emitted. It is never
+   persisted and never sent — `context` and `before_provider_request` both scrub outbound —
+   and the next context rebuild reads the already-cleaned file. Removing it would mean
+   mutating pi's agent state from an extension, which is a larger risk than the residual.
+9. **(Gate defect, closed) `before_provider_request` never fired under the canary suite.**
+   pi-ai's real provider implementations call `options.onPayload`
+   (`api/openai-completions.js:204` and its siblings); the faux provider the suite drives
+   never does. Measured with a probe extension: `agent_start`, `context`, `message_end`,
+   `tool_call` and `tool_result` all fire, and `before_provider_request` fires ZERO times.
+   So "the bytes leaving the machine are scrubbed" — this design's central claim — was
+   asserted by nothing, and every scenario was checking files only. The harness now injects
+   the callback a real provider would, and the new scenario asserts on what the hook
+   RETURNED, non-vacuously: ≥3 payloads captured, no canary on the wire, and the ref
+   present so a blackout cannot pass. If pi-ai's faux shape changes, the harness throws
+   rather than silently reverting to testing nothing.
+   Same shape as the vacuous sweep (§12a item 7): a check that cannot fail. Two of them,
+   found the same way — by asking what the check actually executes.
+10. **(Fixed) The integration suite read the developer's real settings.** `makeSecureSession`
+    created a temp `agentDir` for the resource loader but never passed it to
+    `SettingsManager`, which then defaulted to the real `~/.pi/agent`. The suite was
+    subject to whatever compaction thresholds, model defaults and provider settings the
+    developer happened to have.
+11. **`/resume` is now a scenario** (`parseSessionEntries` + `buildSessionContext` — pi's own
+    resume path): the rebuilt context carries the ref, never the canary, and the ref is dead
+    afterwards rather than silently literal.
+
+## 12c. Design compromises re-examined 2026-08, and what changed
+
+A deliberate pass over the compromises taken while the picture was still forming. Six were
+changed; the reasoning is recorded because the *original* arguments were not wrong so much as
+miscalculated, and the miscalculation is the part worth keeping.
+
+1. **`--sec-file-reads` was opt-in. Now default-on.** The original argument was sound — masking a
+   credential file breaks the read → edit round-trip — and the sizing was wrong, because shape
+   masking already applied to every OTHER source of file content. Only `read`/`grep`/`find`/`ls`
+   were excluded, and `cat ~/.aws/credentials` through bash was masked all along. The flag was
+   closing one side door while leaving the front one open, and §13.3 called that front door the
+   largest hole in the design. The flag is now the escape hatch, and a test pins that turning it
+   off re-opens `read` but NOT bash — if the knob were wider than its description, the flip would
+   have bought nothing.
+2. **`/sec off` was a half-switch. It now clears the vault.** Injection and capture stopped, but
+   the values stayed in memory, so every existing ref remained spendable while the UI said refs
+   would not expand. Output scrubbing deliberately stays on: masking is a filter, not a capability.
+   `/sec on` does not restore the values — silently resurrecting them would make the switch
+   meaningless.
+3. **`peerDependencies: "*"` → `~0.85.1`.** "*" was written before the design had ever run. It
+   now rests on pi internals cited by file and line (§3), two of whose claims were already wrong.
+   An unconstrained range advertises compatibility with exactly the versions where those internals
+   have moved.
+4. **§3 is executable.** `test/mechanics.test.ts` asserts each row. When a row fails, the response
+   is to re-measure and then either fix pi-secure or amend §3 — never to relax the assertion.
+5. **`looksCredentialish` moved out of `scrub.ts`.** It was written there when capture and
+   scrubbing shared a module by convenience; the scrubber then stopped consuming it, leaving
+   capture.ts as the only caller. The shared piece is the digest denylist, and the anchoring is
+   load-bearing in both directions: a credential with a long hex tail CONTAINS a 40-hex run, so
+   exempting a substring leaves a real secret fully visible.
+6. **"Last mile" was the wrong mental model.** `before_provider_request` is provider-level — pi-ai
+   invokes it from inside each provider's api — so it is an extra layer that depends on the
+   provider. The durable guarantee is `context` + `message_end` + `tool_result`. pi-secure now
+   measures whether the provider-level hook ran and says so once if it never did, because that
+   failure mode is otherwise completely silent.
+
+### Recorded, not changed
+
+- **Delivery through the child's environment.** `/proc/<pid>/environ` is owner-readable for the
+  life of the command, so any same-user process can read a ref's value. This is not a new hole —
+  `bash` already gives the model the user's full read access — but it belongs in the record. A
+  file-descriptor handoff (memfd + seal) would avoid it entirely and needs spawn support from pi;
+  building it here would mean reimplementing process spawning, which is a far larger risk than
+  the exposure it removes.
+- **`[[ $a > $b ]]` is a known false positive** in the redirect detector. Teaching the scanner
+  about `[[ ]]` is the fragile-detector work this design has twice declined, and a spurious
+  warning is user-visible noise, never a security hole.
+
+## 12d. The fingerprint became a masked preview (2026-08)
+
+§6.1 and §11 specified a `sha256:<16 hex>` fingerprint wherever a secret is identified but not
+revealed. That was sound — one-way, reveals nothing — and useless for its actual job: nobody can tell
+from a digest whether the key they just pasted is the key they meant to paste, so "confirm a capture
+without echoing it" was a formality. The convention every API-key console already uses is a prefix and
+the last few characters with the middle masked, and adopting it is what makes the confirmation flow
+usable by the person rather than only by the code.
+
+**The gate is not "is this a key or a password."** That question has no good answer, and asking it is
+how the first draft ended up gating on length and getting it wrong in both directions: a 20-character
+generated password and a 20-character human password are the same length. Measured entropy settles it
+too — the "strong generated password" band (4.25–4.70 bits/char) OVERLAPS the human band (3.38–4.12),
+so per-character entropy cannot separate them either. The rule therefore asks the boring question:
+*does showing a few characters meaningfully weaken this value?*
+
+| Tier | Condition | Reveal | Why |
+|---|---|---|---|
+| 1 | matches a known provider format | prefix + 4 + `…` + 4 | provider-issued, long, random by construction: ~48 bits out of ~190. The prefix is also what identifies the KIND of key, which is the most useful thing on the line |
+| 2 | ≥ 20 chars and ≥ 4.5 bits/char | 2 + `…` + 2, capped at a tenth per side | covers strong GENERATED passwords. Refusing those would be the length rule failing the other way: two characters cost ~12 bits out of ~120 |
+| 3 | everything else | `sha256:…` | passphrases are where head-and-tail actually hurts — `correct-ho…ry` tells a logging endpoint the secret is English-ish. Also DSNs and short values |
+
+The asymmetry is deliberate: revealing too much costs a couple of characters and is bounded by the
+share rule; revealing too little costs a slightly less convenient confirmation and nothing else. When
+the classifier is unsure it hides, which is why 4.5 sits ABOVE the human band rather than inside it.
+
+Two findings while implementing it, both worth keeping:
+
+- **A "find the leading hyphenated segment" prefix rule is a real bug, not a style question.** It reads
+  `xK3-mQ7-` in a random 20-character secret as a prefix, prints all nine characters, and spends them
+  before the share rule has counted one. A real console can afford to show a prefix because it KNOWS
+  the format; so the prefix is shown only when the value matches a recognised format.
+- **"What does a credential look like" is needed on both sides** — the scrubber to mask it, the preview
+  to decide what may be shown. `PROVIDER_PREFIX_SOURCES` now lives in `entropy.ts` so there is one
+  table rather than two that can drift. This is the second time that table has moved for the same
+  reason.
+
+**This is a deliberate weakening of §11's "receipt/fingerprint paths must be value-free by
+construction".** A few characters of a long secret now reach the transcript, which is exactly what makes
+them recognisable to the person who pasted them. The floor and the share rule are what keep it bounded,
+and `PublicEntry.preview` is computed once at insert time so no consumer re-derives it from the value.
+
+## 12e. A field report: the bash-ownership warning was wrong (2026-08)
+
+A user hit `pi-secure: another extension owns bash, so {{sec:…}} refs will NOT expand` on an
+install where nothing else registers `bash` and refs were expanding correctly. Worth recording,
+because the defect was not a typo — it was the wrong *question*.
+
+The check has to answer "is the registered `bash` definition ours?", and it was answering by
+comparing a directory derived from `import.meta.url` against `sourceInfo.baseDir`. Two measured
+facts break that:
+
+1. **Node resolves modules to their real path; pi reports the path it loaded from.** `pi install
+   <path>` creates a link under the agent dir, so `import.meta.url` is the checkout and pi's
+   `sourceInfo.path` is the link. The two strings never match on any symlinked install.
+2. **`sourceInfo` frequently has no `baseDir` at all.** Loading this package by file path through
+   `DefaultResourceLoader` and dumping the extension's sourceInfo yields `{path, source, scope,
+   origin}` and nothing else — the `baseDir` branch was dead most of the time, which forced a
+   `/pi-secure/` substring fallback, and the substring is exactly what fails when the link is
+   named anything else.
+
+So the warning fired exactly when it should not, and stayed silent in the case it exists for.
+
+The fix compares the **realpath of the extension entry file** against our own entry. That is
+exact for every install layout — renamed directory, package cache, symlink, relocated checkout —
+and cannot be spoofed by a path that merely resembles ours. The regression test builds a real
+symlink to this package's `index.ts` under a name that does not contain "pi-secure" and asserts
+the check accepts it; it fails against the previous code.
+
+Two transferable lessons:
+
+- **A stub that agrees with the code under test is how a wrong check stays green.** The wiring
+  harness's `getAllTools` returned the invented path `"pi-secure"` — a shape pi never produces —
+  because that string satisfied the substring check under test. It now returns the real entry path.
+- **A diagnostic must not be able to break the session.** The warning path called
+  `ctx.ui.notify` unguarded, so a UI context without `notify` threw out of `session_start`. It is
+  best-effort now, like the capture receipt.
+
+The wording changed to match reality too: first registration of a tool name wins, so load order is
+the lever. "Load pi-secure after it" was both imprecise and — in the failing case — advice for a
+problem that did not exist.
+
+## 12f. The secret prompt is an ordinary pi dialog (2026-10-08, from use)
+
+Three field reports with one theme: a surface that **mimics** pi drifts from pi, while a surface
+**built from** pi's parts cannot.
+
+**The prompt was hand-drawn.** The name step (`ctx.ui.input`) and the secret step were the same
+flow but not the same look — different position, different chrome. It is now assembled from the
+exact parts `ExtensionInputComponent` uses, in the same order: `DynamicBorder`, `Spacer`, an
+accent title, the `Input` line, a `keyHint` footer, `DynamicBorder`. Deliberately **without**
+`overlay: true` (see §3): the built-in dialogs render into the editor container, and the overlay
+form centres a panel over the scrollback, which is what collided with the context block.
+
+**Keys were decoded as bytes.** "esc to cancel" did not cancel and Ctrl+C *typed* characters,
+because the kitty protocol delivers `\x1b[27u` / `\x1b[99;5u` / `\x1b[13u` and the old raw-byte
+checks matched none of them, leaving the digits to be appended as text. `matchesKey` is the
+library's canonical decode and handles both encodings; the byte surgery is gone.
+
+**Navigation keys were typed into the secret.** Arrows, Home, End, Delete and Page keys arrive as
+CSI (`\x1b[1;1:1A`) whose `:` parameter is outside the escape-sequence character class, so the
+sequence survived stripping and its characters were appended. They are now matched and **ignored**
+before the printable filter, and the class accepts `:` as a backstop. The cursor stays pinned to
+the end: honouring arrows properly needs a second cursor model for a buffer the user never sees,
+and "arrows do nothing" beats "arrows silently corrupt the secret".
+
+**Transferable rule.** Chrome is *reused*, never imitated. The only thing this extension owns in
+that dialog is the masking, and the value never reaches a rendered node — the input line holds
+bullets and nothing else.
+
+## 12g. Ingest from a file: `/sec add-from-file` (2026-10-08)
+
+### Why, given §6.3
+
+Real keys live in `.env` files. Forcing those through a copy-paste round trip is where people paste
+the key into the chat instead — the behaviour this project exists to prevent. §6.3's exclusion was
+aimed at **ambient** sources (values that become spendable with no user act); a flow where the user
+names a file, sees its variable names, and ticks what to adopt is not ambient. The structural rule
+below (nothing is read until the user types a path) is what keeps it that way, and is an invariant,
+not a convention.
+
+### Scope
+
+**dotenv only.** No JSON/YAML/INI. No interpolation. One file per invocation, no recursion, no
+watching, no memory of the file in later sessions.
+
+### Entry points
+
+| form | behaviour |
+|---|---|
+| `/sec add-from-file` | opens the path picker (§12g.2), then the list |
+| `/sec add-from-file <path>` | skips the picker, goes straight to the list (same validation) — the headless path, mirroring `/sec` vs `/sec list` |
+| the `/sec` menu's *Add from a file…* row | same as the bare verb |
+
+There is **no tool**. The model cannot cause a file to be read and cannot name one; the same
+reasoning as "no `sec_reveal`" (§6.2).
+
+### 12g.1 Path picker
+
+**F1.** No filesystem call happens before the typed (expanded) text contains a `/`. Opening the
+picker, an empty buffer, and a bare word all list nothing. The candidate function is not reached,
+which is what makes this checkable rather than aspirational.
+
+**F2.** A path is read only as a **regular file**: directories, FIFOs, sockets and device nodes are
+refused (a FIFO would block the UI forever), as are files over 1 MiB and non-text input (a NUL byte
+in the first 8 KiB).
+
+Resolution: `~` and `~/…` expand to `$HOME`; `~user` is not supported; relative paths resolve
+against `ctx.cwd`; the input is never rewritten to an absolute path.
+
+| key | behaviour |
+|---|---|
+| character | edits the path; candidates re-narrow per keystroke (local `readdir`) |
+| Tab | accepts the highlighted row — a directory descends (appends `/`), a file completes the name. No candidates → nothing. |
+| ↑ / ↓ | move the highlight |
+| Enter | confirms only an existing regular file; a directory descends; anything else shows an inline error and leaves the input untouched |
+| Esc / Ctrl+C | cancel the whole flow; nothing is added |
+
+Enter acts on what was **typed**, Tab on what is **highlighted** — chosen over mirroring the main
+editor (where Enter applies the highlighted completion) so the footer can state the rules in one
+line and a mis-aimed Enter cannot silently pick a neighbouring file.
+
+Candidates: names beginning with the fragment, **dotfiles included**, `.`/`..` excluded, directories
+first then files, each alphabetical, directories marked with a trailing `/`. `../` is offered first
+**only while the fragment is empty**: a navigation row cannot match a filter, and as the first row it
+would become Tab's default target, turning `./.env` + Tab into `./../`. Prefix matching only — no
+fuzzy, no case-insensitivity.
+
+### 12g.2 The assignment list
+
+Rows show the **final vault name** and nothing else about the value.
+
+| line | result |
+|---|---|
+| `KEY=value`, `export KEY=value`, indented | added (`export`/indent stripped) |
+| `# comment`, blank | skipped |
+| `KEY=value # note` | value is `value` (inline comment needs preceding whitespace) |
+| `KEY=abc#def` | value is `abc#def` |
+| `KEY=`, `KEY="   "` | skipped as empty |
+| `KEY="a b"`, `KEY='a b'` | value is `a b`, quotes stripped |
+| the same key twice | last wins; the list notes `1 duplicate collapsed` |
+| `KEY: value` | skipped — not an assignment |
+| `KEY="unterminated` | skipped, counted in the footer |
+| CRLF, leading BOM | `\r` stripped, BOM stripped |
+
+**F3. The vault receives the bytes between the quotes, never a value the parser invented.** No
+expansion engine: `"a\nb"` is stored literally and the row is marked `escapes stored as written`;
+`${OTHER}`/`$OTHER` is stored literally and marked `unexpanded ref`. Flagged, not repaired — a
+vault value that quietly differs from what the application reads out of the same file is worse than
+a visible marker, and a partial dotenv implementation is a bug farm.
+
+**F4. Naming only ever lowercases and numbers.** Lowercase, then try the base name, `1`, `2`, `3`…
+against both the vault and the names already assigned **earlier in this same run**. A name that is
+still invalid after lowercasing (`2FA_TOKEN`, `MY.KEY`) is **not offered**: the row is disabled
+with the reason (`can't auto-name: starts with a digit`). Repairing it would invent a name the user
+did not write (`k_2fa_token`) and produce a `{{sec:…}}` they later cannot explain. Editing the file
+is the fix.
+
+**F5. The name shown on the row is the name that gets created.** Suffixes are resolved while the
+list is built, not while adding; otherwise ticking `my_api_key1` could create `my_api_key2`.
+
+**F6. The value is never rendered.** No value, preview or fragment in candidates, rows, errors,
+footer, or receipt — the same projection discipline as `/sec list`, which shows a masked preview
+only *after* the value is in the vault. A file with no assignments produces a notification and no
+list.
+
+**F7. Unticked means absent.** Only ticked rows are added; cancel adds nothing; a per-key failure
+skips only that key and reports why (the others still land). The parsed map is local to the flow and
+dropped on every exit path, including cancel and throw — §7's "never written to" applies unchanged.
+
+**F8. The classifier gates the default view, never the data.** The list opens showing only the
+assignments §12g.3 calls likely secrets, and `TAB` reveals every row. Hiding noise was a correction,
+not the original design: the first version showed all 34 rows of a shell profile with 10 marked, 6 of
+them wrongly, and the user asked for the noise to go. The escape hatch is what keeps that safe —
+no line of the file is unreachable, so a missed secret costs one keypress instead of a silent loss.
+When *nothing* is likely, everything is shown rather than an empty screen, and the toggle is not
+offered because it would only produce one.
+
+The path itself is **not** treated as a secret: it appears in the transcript exactly as `cat .env`
+would. Scrubbing the user's own typed command would be theatre, and the threat model already
+assumes `bash` can read anything as that user.
+
+### 12g.3 Which assignments are offered
+
+Measured, not guessed. Importing a real `~/.bashrc`:
+
+```
+34 assignments · 10 look like secrets · 16 duplicate collapsed · 91 line skipped
+```
+
+Six of those ten were shell structure: `PS1`, `LD_LIBRARY_PATH`, `__conda_setup`,
+`NODE_EXTRA_CA_CERTS`, `BETTERWRIGHT_CHROMIUM_ARGS`, `debian_chroot`. Entropy cannot separate those
+from a token — `PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '` is high-entropy and
+multi-class — so `looksCredentialish` now also refuses anything shaped like shell syntax, a path or
+a list:
+
+| rejected because | example |
+|---|---|
+| whitespace, quoting or shell metacharacters | `PS1='…\u@\h…'`, `__conda_setup="$(…)"` |
+| a path stem (`~`, `/`, `./`, `../`) | `~/.local/share/mkcert/rootCA.pem` |
+| a CLI flag, or an `--a,--b` list | `--no-sandbox,--disable-dev-shm-usage` |
+| a `:`/`,`-separated list with no `://` | `/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu` |
+| a plain scheme URL | `https://proxy.golang.org,direct` |
+| a digest | the git-SHA exemption, unchanged |
+
+`isLikelySecret(name, value)` then decides — **in this order, because the order is the design**:
+
+1. **provider format** (`matchesProviderFormat`) → a secret, whatever it is named. This is what
+   rescues `GH_PAT=ghp_…`: a token exported under a name that says nothing.
+2. **identifier/setting name** → not a secret. `CLOUDFLARE_ACCOUNT_ID` is 32 random-looking hex
+   characters, and no entropy rule distinguishes that from a hex token, so without a name veto the
+   row appears or not according to how much repetition the particular ID happens to contain. `url`
+   and `key` are deliberately **absent** from this list (a DSN carries a password, and a signed URL
+   is itself a credential); `pwd` is **present**, because in a shell file `PWD` is a directory while
+   `pwd` in the scrubber's word list means a password — one word, two meanings, and the file-import
+   reading is the literal one.
+3. **sensitive name** (`*_API_KEY`, `*_TOKEN`, `*_SECRET` …) → a secret. The only signal that
+   catches a real key whose value is short or oddly shaped, and on the measured file it was
+   load-bearing for every genuine one.
+4. **value shape** → the strict entropy rule above, which catches a secret under a neutral name
+   (`LEGACY_KEY`).
+
+The word list in (3) is `SENSITIVE_NAME_SOURCE`, shared with the scrubber's key/value pass — the
+same judgement in both places, one definition.
+
+**The vector is `test/fixtures/realistic-bashrc.env`.** It carries every shape above with fabricated
+values, and `test/entropy.test.ts` asserts a verdict per variable name plus a case that fails if a
+line is added without a declared verdict. It is a file rather than an inline copy so it can also be
+imported by hand while developing.
+
+### Modules
+
+| file | change |
+|---|---|
+| `src/env-file.ts` | **new** — pure or fs-only, no UI: `parseDotenv`, `chooseName`, `splitPathInput`, `listCandidates`, `inspectPath` |
+| `src/file-import.ts` | **new** — the flow's two screens (picker, assignment list). The list component returns row **ids**, so it is never handed a value: F6 does not depend on anyone remembering it |
+| `src/commands.ts` | the `add-from-file` verb, the flow, the receipt, and the `VERBS` entry |
+| `src/menu.ts` | the `add-file` action and its "Add from a file…" row (`f`) |
+| `src/vault.ts` | `SecretSource` gains `"file"` |
+
+### What this does not change
+
+§8's scrubbers are untouched, because values in this flow never travel the model path at all —
+`readFileSync` to vault, with no tool result, message or provider payload in between. `--sec-file-reads`
+(§8.2) governs *tool output* and is unaffected. §9's enforcement rules are unaffected.
+
+### Testing
+
+Pure unit tests for the parser table, naming/suffixing (including F5's ordering), path splitting
+and `~` expansion, candidate listing, and the F2 validator (non-regular, oversized, binary, CRLF,
+BOM) — `test/env-file.test.ts`. The classifier is pinned by the golden vector
+`test/fixtures/realistic-bashrc.env` (§12g.3): a verdict per name, a count that fixes the
+false-positive rate, and a case that fails when a fixture line has no declared verdict. Component
+tests drive the real screens through a fake `ctx.ui.custom` (`test/file-import.test.ts`): typing
+narrows, Tab accepts and descends, Enter on a directory descends, Enter on a file confirms, Esc
+cancels, and an empty buffer performs **zero** `readdir` calls (F1); the assignment list defaults to
+the likely rows, `TAB` reveals and re-hides the rest, `a` selects only what is visible, and a tick
+survives the flip (F8). Wiring tests cover both entry forms, the menu row, the `file` source label,
+and that the receipt names keys only. The canary sweep (§13.3) gains this flow, asserting the
+stronger property that an import appends **nothing** to the transcript — not merely that no value
+appears in it.
+
+Mutation-checked by disabling one guard at a time and confirming the tests go red: F1 (the separator
+rule — two tests, including the component's), F6 (a value placed in a rendered row), and F8 (the
+classifier's verdict ignored, i.e. everything shown by default); plus the classifier itself, by
+removing the shell-syntax rejection and watching the golden vector fail.
+
+## 12h. Quoting the ref syntax must not require evading our own guard (2026-10-08, from use)
+
+### The incident
+
+Two refusals in one session, both while *documenting* pi-secret, not using it:
+
+1. The `write` tool refused a README whose content quoted the syntax — `{{sec:github_token}}`,
+   `{{sec:NAME}}` — with "sec refs are not written to files".
+2. `bash` refused a quoted heredoc carrying a commit message that happened to contain a ref-shaped
+   placeholder — "sits in a shell context that will not expand it".
+
+The only escapes were `/sec off` (which clears the vault — a sledgehammer that destroys the session's
+secrets to write a paragraph of documentation) or assembling the literal at runtime (`"{" + "{"`),
+which the guard never sees. The second escape is the tell: **this guard is a tripwire, not a
+boundary.** A model that means to cross it crosses it textually; only the accident is stopped. A
+tripwire loses nothing by gaining a deliberate door — and until it has one, every intentional use is
+a false positive.
+
+### What the guard actually protects
+
+Not confidentiality. A ref carries a *name*, names are shown to the model by design (`sec_list`), and
+no value can enter the file through one. The hazard is **correctness**: the model persisting a masked
+tool result into a file a later consumer expects to hold a real credential — `~/.netrc` with
+`password {{sec:gh_pat}}` breaks auth silently. That mistake has a signature: the echoed ref
+**resolves in the vault**, because the scrubber only mints refs for stored values. A ref to a name
+that is not stored cannot be a persisted value; it is syntax being quoted.
+
+### The rule
+
+`write`/`edit`, in order:
+
+1. A ref in the `path` field is always refused. An address is never the place to quote syntax, and
+   the file that would be created is wrong whatever the name resolves to.
+2. **Target carve-out.** Paths with a `docs`/`doc`/`test`/`tests`/`fixtures`/`examples` directory
+   segment, or a `.md`/`.markdown`/`.example`/`.sample`/`.template` basename, allow every ref and
+   notify the user once. Quoting the syntax is the norm there, names are not secrets, and the one
+   thing that must never happen — substitution — is refused by construction: the allow path returns
+   before expansion runs.
+3. Otherwise: refs that **do not resolve** are allowed, silently — quoting a name that holds nothing
+   cannot be a persisted value. Refs that **resolve** are refused, with the message split so it
+   teaches the recovery: the ref resolves, so the file would contain the placeholder rather than the
+   value; tell the user where it needs to go and let them place it.
+4. **The reserved marker is never prose.** The first canary run against this design failed, and the
+   failure was the design's own blind spot: a scripted write carrying a literal `ghp_…` value arrived
+   at the gate as `token={{sec:redacted}}` — the *scrubber's* marker, minted upstream when the value
+   was shape-masked, non-resolving by construction. "Non-resolving means prose" cannot distinguish
+   quoted syntax from our own masked output coming back. The structural discriminator is the name:
+   `redacted` is the one name the scrubber owns (`RESERVED_NAME`, the single source scrub.ts's
+   `GENERIC` marker is now derived from). A ref with that name in a non-doc target is refused
+   whatever the vault says; doc targets may quote it, because the spec and README legitimately do.
+
+`bash`, with the guard and the expander kept in agreement (the defense-in-depth note in
+`injectBashCommand` exists because they can drift): a ref in a non-expanding context — quoted-heredoc
+body, `#` comment, or after an unterminated quote — is a problem **only if it resolves**. A
+non-resolving ref there is prose and passes through as the literal it already is — except the
+reserved marker, which is excluded for the same reason as in the write gate. `expandBash` must drop
+the matching `missing` entries, or the guard's allow is undone one line later by the caller's
+fail-closed block.
+
+### The notify — decided: always
+
+Doc-path allows notify the user every time, one line: the count, the path, and that names only were
+written — no values substituted. Chosen over notifying only when a ref resolves, because the silent
+case is the one a user cannot reconstruct later, and because one line per tool call is already the
+natural throttle. It goes to `ctx.ui.notify` only and never to the model, the same rule as the
+redirect warning. Non-doc, non-resolving allows stay silent: nothing surprising happened.
+
+### What this does not change
+
+- `read`/`grep`/`find`/`ls`: a ref in a path or pattern is still refused outright.
+- A literal **value** (not a ref) in any tool argument still refuses first — a doc is not licensed
+  to carry the secret itself, only its syntax.
+- `/sec off` still clears the vault; it remains what it was, not the escape hatch for this.
+
+### Modules
+
+`glue.ts` gains `isDocPath` and the write/edit verdict (allow-and-notify | silent allow | block);
+`InjectOutcome` gains `notify?`. `guard.ts`'s `bashRefIssues` filters non-resolving inert refs.
+`bash.ts`'s three fail-closed branches skip `missing` when the name does not resolve. `index.ts`
+surfaces `out.notify` through `ctx.ui.notify`, gated on `ctx.hasUI`.
+
+### Testing
+
+Red-first unit table for the verdict — {doc, non-doc} × {resolving, non-resolving} plus ref-in-path —
+with the input content asserted **byte-identical** on every allow (the allow path must never
+substitute, and the fastest way to rot that is an early-return that drifts). `isDocPath` pins each
+path class. For bash: the commit-message incident is a golden vector (quoted heredoc, non-resolving
+name → passes `injectBashCommand` unchanged), while a resolving name in the same heredoc still
+reports "will not expand it"; the comment and unterminated branches likewise. Wiring asserts the
+notify reaches `ctx.ui.notify` and the call is *not* blocked. Mutation-checked by disabling
+`isDocPath`, inverting the resolve gate, and restoring the unconditional `missing` push — each turns
+tests red.
+
+### Residuals, accepted
+
+- A doc quoting a *resolving* ref is allowed: correct, because documentation needs real names and
+  substitution is refused by construction.
+- A model determined to write names into a doc can — names were never the secret, and the notify
+  makes it visible to the one person who cares.
+- **Prose quoting the reserved marker through bash into a non-doc file stays refused.** The original
+  incident did exactly that (pi's own tool descriptions use `{{sec:redacted}}` as their placeholder,
+  and the commit message copied it). The cost is one word: quote any other placeholder name. Doc and
+  test targets are exempt, so documentation of the marker itself is unaffected.
+- A user who deliberately stores a secret *named* `redacted` makes their stored ref collide with the
+  scrubber's marker. The write gate refuses it either way (resolving or reserved), so the failure is
+  conservative; `/sec rename` is the escape.
+- The carve-out list is convention, not truth: `.example`-suffixed files and `examples/` directories
+  are templates by culture. Anything outside it is one deliberate rename away from the old behavior,
+  which is the intended friction for genuinely ambiguous targets.

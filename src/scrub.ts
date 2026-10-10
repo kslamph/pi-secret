@@ -1,5 +1,12 @@
 import { MIN_SCRUBABLE_LENGTH, derivedForms, RESERVED_NAME } from "./refs.ts";
-import { PROVIDER_PREFIX_SOURCES, SENSITIVE_NAME_SOURCE, isDigestShaped } from "./entropy.ts";
+import {
+  PROVIDER_PREFIX_SOURCES,
+  SENSITIVE_NAME_SOURCE,
+  isDigestShaped,
+  isPlaceholderValue,
+  hasSecretReferencePrefix,
+  matchesProviderFormat,
+} from "./entropy.ts";
 
 export interface SecretProvider {
   values(): string[];
@@ -391,6 +398,26 @@ export function maskShapes(text: string): ScrubResult {
     const target = captured ?? match;
     if (isDigestShaped(target)) return match;
     if (target.length < MIN_SCRUBABLE_LENGTH) return match;
+    // The two vetoes capture.ts has applied since 2026-10-09, which the scrub path never
+    // did. Measured 2026-10-10 on a vendor API page returned by get_search_content: an
+    // `api_key=` line and an `apiKey:` line were both rewritten to the generic marker, so
+    // the page told the model a credential had been hidden where what it actually contained
+    // was an env lookup. isPlaceholderValue and hasSecretReferencePrefix give the right
+    // verdict on both; they simply were never asked.
+    //
+    // Two scoping rules, both learned from the first version of this being too broad.
+    //
+    // 1. KV ALTERNATIVE ONLY, and the narrow prefix predicate rather than
+    //    looksLikeSecretReference - whose DOTTED_REF_RE arm also matches a JWT, and a JWT
+    //    reaching `token: eyJ...` through the KV branch would then be unmasked. The existing
+    //    masks-JWTs test caught exactly that on the first attempt.
+    // 2. A provider-format value is masked regardless of shape - an AWS key id enclosed in
+    //    braces is placeholder-shaped and is still a credential, so the regex's prefix
+    //    branch wins over either veto.
+    if (captured !== undefined && !matchesProviderFormat(target)) {
+      if (hasSecretReferencePrefix(target)) return match;
+      if (isPlaceholderValue(target)) return match;
+    }
     hits++;
     return captured ? match.slice(0, match.length - captured.length) + GENERIC : GENERIC;
   });
