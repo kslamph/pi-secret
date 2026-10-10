@@ -21,7 +21,7 @@ import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 import { withPiSecretPrompt } from "./prompt.ts";
 
-export const VERSION = "0.4.1";
+export const VERSION = "0.5.0";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes

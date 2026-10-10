@@ -1,6 +1,6 @@
 {
   "name": "pi-secret",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Keep API keys, tokens and passwords out of the model's context: the agent uses {{sec:NAME}} refs, the value is expanded only for the command that needs it.",
   "type": "module",
   "license": "MIT",
