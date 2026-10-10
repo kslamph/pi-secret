@@ -58,18 +58,29 @@ export function bashRefIssues(
   const names = vault.names();
   return classifyBashRefs(command, vault)
     .filter((r) => r.disposition !== "expand")
-    // §12h: an inert ref whose name stores nothing is prose — a commit message or
-    // comment quoting the syntax, not a value being denied delivery. Two things
-    // stay errors: a ref that RESOLVES (a real secret landing where it cannot
-    // expand) and the scrubber's reserved marker (a masked value being heredoc'd
-    // into a file — the mistake this guard exists for).
-    .filter(
-      (r) => !(r.disposition === "inert" && !vault.has(r.name) && r.name !== RESERVED_NAME),
-    )
+    // Two exemptions, and the second one is a correction.
+    //
+    // 1. §12h: a non-resolving ref in an inert region is a commit message or a heredoc
+    //    body quoting the syntax, not a value denied delivery.
+    // 2. The reserved marker is never an error anywhere. No value is ever behind
+    //    `{{sec:redacted}}` — it is the text pi-secret itself writes where it masked one
+    //    — so refusing the command protected nothing and blocked ordinary work: reading
+    //    or patching any file that mentions it, this project's own docs and tests
+    //    included. It used to be the one name that could never be prose, which is
+    //    exactly backwards.
+    //
+    // Everything else still errors, and that is the point: a stale ref after /resume, or
+    // a typo, must fail loudly rather than run `curl -H 'Bearer {{sec:gh_pat}}'` with a
+    // literal placeholder and let the model report success.
+    .filter((r) => {
+      if (vault.has(r.name)) return true;
+      if (r.name === RESERVED_NAME) return false;
+      return r.disposition !== "inert";
+    })
     .map((r) => ({
       ref: r,
       problem:
-        r.disposition === "inert"
+        r.disposition === "inert" || vault.has(r.name)
           ? `{{sec:${r.name}}} sits in a shell context that will not expand it (quoted heredoc body, or an unterminated quote). Move it outside, or pass it via an environment variable.`
           : `sec:${r.name} not found. Available: ${names.length ? names.map((n) => `sec:${n}`).join(", ") : "(none — run /sec add)"} Values are never shown.`,
     }));

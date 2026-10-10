@@ -462,7 +462,17 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
   const bind = (name: string): string | undefined => {
     const value = resolve(name);
     if (value === undefined) {
-      if (!missing.includes(name)) missing.push(name);
+      // The reserved marker is exempt, and it is the ONLY exemption: no value is ever
+      // behind `{{sec:redacted}}` — it is the text pi-secret itself writes where it
+      // masked one — so reporting it as a name that could not be delivered refuses
+      // commands that merely quote the syntax. Measured 2026-10-10: two of my own tool
+      // calls were refused outright, both of them edits to this project's own tests.
+      //
+      // Every other unresolvable name is still reported, deliberately: after /resume the
+      // vault is a new session's, so a ref carried by the transcript is stale, and
+      // running `curl -H 'Bearer {{sec:gh_pat}}'` with a literal placeholder is the
+      // false-confidence failure this design treats as its worst case.
+      if (name !== RESERVED_NAME && !missing.includes(name)) missing.push(name);
       return undefined;
     }
     const varName = envVarName(name);
@@ -494,11 +504,17 @@ export function expandBash(command: string, resolve: SecretResolver): BashExpans
     // message, a comment, documentation inside a heredoc. Nothing can be denied
     // delivery because there is no value behind the name, so the fail-closed
     // branches below do not apply to it: it passes through as the literal it
-    // already is. The scrubber's RESERVED_NAME is deliberately excluded: that
-    // name means a masked VALUE (not prose) is headed for a file. The guard
-    // (bashRefIssues) filters the same case, and the two must agree or an allow
-    // here is undone by the caller's `missing` block.
-    const prose = resolve(ref.name) === undefined && ref.name !== RESERVED_NAME;
+    // already is.
+    //
+    // The scrubber's RESERVED_NAME is NOT excluded here, and that exclusion is what
+    // this line used to have. `{{sec:redacted}}` is never backed by a value — it is the
+    // text pi-secret itself writes where it masked one — so treating it as a value
+    // denied delivery refused any command that merely contained it, including edits to
+    // this project's own docs and tests. A masked value headed for a file is still
+    // reported, by the user-only redirect warning. The guard (bashRefIssues) filters the
+    // same case and the two must agree, or an allow here is undone by the caller's
+    // `missing` block.
+    const prose = resolve(ref.name) === undefined;
     // A ref inside a comment is text bash DISCARDS — the command runs without it
     // ever being delivered. Expanding it would report the ref as `used` while
     // nothing reaches the child, which is exactly the silent-non-delivery failure:

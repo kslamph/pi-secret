@@ -18,7 +18,7 @@ import { fingerprint } from "./refs.ts";
 import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes
@@ -299,6 +299,17 @@ export default function piSecret(pi: ExtensionAPI): void {
     if (out.hits && ctx.hasUI) {
       // Never interpolate event.input here: it carries EXPANDED args with real values.
       ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in ${event.toolName} output`, "info");
+    }
+    // A screenshot cannot be scrubbed — masking base64 corrupts the image and the
+    // provider rejects the request — so image and other binary payloads pass through
+    // byte-identical. Saying so is the whole point: a silent pass-through reads as
+    // "checked, found nothing", and this is the one case where that is false.
+    if (out.skippedBinary && ctx.hasUI) {
+      ctx.ui.notify(
+        `pi-secret left ${out.skippedBinary} binary payload(s) in ${event.toolName} unscrubbed — ` +
+          "image/audio content is never filtered, so a secret visible inside a screenshot still reaches the provider",
+        "info",
+      );
     }
     // Returned unconditionally, including when hits === 0: this hook is the primary
     // guarantee (it runs before the result message is built and persisted), so the

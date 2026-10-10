@@ -73,7 +73,16 @@ const JWT_RE = String.raw`eyJ[A-Za-z0-9_\-]{5,}\.eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0
 // The word list is shared with `entropy.ts` (§12g's classifier is its third consumer): a name that
 // says "token" or "api_key" is a secret-shaped name in every context this project has, and two
 // copies of that judgement is the drift the design keeps paying for.
-const KV_RE = String.raw`[A-Za-z0-9_\-]*(?:${SENSITIVE_NAME_SOURCE})[A-Za-z0-9_\-]*["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>]{8,})`;
+// The two run bounds are not cosmetic and not optional: without them this pattern is
+// O(n²) in the length of a single word-character run, because at every start position
+// the engine consumes the whole run with the leading `*` and then backtracks one
+// character at a time looking for a keyword that is not there. Measured 2026-10-10:
+// `maskShapes` on 1MB of `a` did not finish in 6 seconds; with {0,32} bounds it is
+// 191ms. Reachable from any tool result carrying one long unbroken word — a minified
+// bundle on one line, a hex dump, a token blob — and a hang on the outbound path is a
+// turn that never completes, which is exactly the failure this project refuses to cause.
+// 32 is generous for a key NAME; the value class below is untouched.
+const KV_RE = String.raw`[A-Za-z0-9_\-]{0,32}(?:${SENSITIVE_NAME_SOURCE})[A-Za-z0-9_\-]{0,32}["']?\s*[=:]\s*["']?(?!\{\{sec:)([^\s"'<>]{8,})`;
 
 /**
  * Excluded wholesale. The git-SHA rule matters most: pi prints 40-hex commit
@@ -233,28 +242,49 @@ function maskForms(text: string, forms: Form[]): ScrubResult {
     }
   }
 
-  // Longest span wins on overlap — preserves the old per-form "longest first"
-  // semantics (a containing secret must mask before a contained one).
+  // Fast path, and it is the whole fix: the previous version scanned the accepted
+  // list per candidate, which is O(hits²). Measured 2026-10-10: 623ms at 8000 hits and
+  // 32.6 SECONDS at 60000 — a 4MB log repeating a vaulted value froze the turn, in
+  // tool_result, in context, and in the streaming bash display.
+  //
+  // A coverage bitmap instead. It is not just faster, it is linear: one form of length
+  // f occurring k times in a buffer of length L satisfies k·f ≤ L, so marking every
+  // span costs O(L) per form and O(forms · L) overall. The longest-first order is kept,
+  // so "a containing secret wins over a contained one" is unchanged — a later, shorter
+  // span is skipped because its bytes are already covered.
   spans.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+  const covered = new Uint8Array(text.length);
   const accepted: Span[] = [];
   for (const s of spans) {
-    let overlap = false;
-    for (const a of accepted) {
-      if (s.start < a.end && s.end > a.start) {
-        overlap = true;
+    let clash = false;
+    for (let i = s.start; i < s.end; i++) {
+      if (covered[i]) {
+        clash = true;
         break;
       }
     }
-    if (!overlap) accepted.push(s);
+    if (clash) continue;
+    for (let i = s.start; i < s.end; i++) covered[i] = 1;
+    accepted.push(s);
   }
 
-  // Apply right-to-left so earlier spans' offsets stay valid as later ones shrink.
-  accepted.sort((a, b) => b.start - a.start);
-  let out = text;
+  // Apply in ONE pass, not one splice per span.
+  //
+  // This was the real quadratic term, and finding it mattered more than the dedup
+  // above: the old loop rebuilt the whole string per accepted span, right-to-left, so
+  // 60000 hits over a 4MB buffer copied ~240GB and took 32.6 seconds. The dedup rewrite
+  // alone did not move that number at all — measured, not assumed, which is how the
+  // second hotspot was found. Spans are disjoint by construction now, so a single
+  // left-to-right emit with a cursor is exactly equivalent and is O(text length).
+  accepted.sort((a, b) => a.start - b.start);
+  const parts: string[] = [];
+  let cursor = 0;
   for (const s of accepted) {
-    out = out.slice(0, s.start) + s.token + out.slice(s.end);
+    parts.push(text.slice(cursor, s.start), s.token);
+    cursor = s.end;
   }
-  return { text: out, hits: accepted.length };
+  parts.push(text.slice(cursor));
+  return { text: parts.join(""), hits: accepted.length };
 }
 
 /** Build the candidate form set for a set of secrets, longest form first. */
@@ -396,18 +426,82 @@ export function scrubText(text: string, vault: SecretProvider, opts: ScrubOption
 }
 
 /**
+ * Values this walk must not treat as containers, because rebuilding them is LOSSY.
+ *
+ * The walk shallow-clones every container to avoid mutating the caller's graph. That is
+ * safe for plain objects and arrays and catastrophic for everything else: spreading a
+ * Buffer or a Uint8Array yields `{0:.., 1:..}`, and a Date yields `{}` — silent
+ * corruption of data pi-secret has no business rewriting, on the same path that must
+ * never produce an invalid request. Found while auditing for exactly that class of bug.
+ *
+ * Class instances that are NOT listed here are still walked and still cloned, because
+ * their enumerable string properties are what a JSON payload carries — leaving them
+ * alone would let a secret ride out inside one, which is the failure this project
+ * exists to prevent.
+ */
+function isOpaque(n: unknown): boolean {
+  return (
+    ArrayBuffer.isView(n) ||
+    n instanceof ArrayBuffer ||
+    n instanceof Date ||
+    n instanceof RegExp ||
+    n instanceof Map ||
+    n instanceof Set
+  );
+}
+
+/**
+ * Is this string leaf a BINARY PAYLOAD rather than text pi-secret may rewrite?
+ *
+ * Rewriting a payload is not "over-masking" — it is CORRUPTION, and the corruption is
+ * what breaks the workflow. Measured 2026-10-10: reading a PNG made maskShapes match
+ * the AWS access-key rule (case-insensitively, `AkIA8BxxiyzGikq3xhqm`) inside the
+ * base64, so the tool result carried 4 substituted spans. The base64 no longer
+ * decoded (272079 bytes instead of 272106) and the very next provider request came
+ * back `400 invalid_request`. Four masked "secrets" and a dead turn.
+ *
+ * pi cannot redact pixels — this layer has no OCR and inventing one would be a
+ * different product. So the only correct behaviour is to pass the payload through
+ * byte-identical and say so out loud (the caller notifies), rather than to pretend
+ * it masked one.
+ *
+ * Two rules, because either alone is incomplete:
+ *  - STRUCTURAL: a `data` field whose block declares a non-text `mimeType`, or a
+ *    `type` of image/audio. That is exactly the shape pi's read tool emits
+ *    (`{type:"image", data, mimeType, note}`), and the `note` beside it is still
+ *    prose, so it keeps being scrubbed.
+ *  - CONTENT: an unbroken base64 run long enough that no prose can be. The bound is
+ *    2048 characters because the shortest thing this must catch in practice is a
+ *    small screenshot's payload, and the longest thing that must NOT be exempted is
+ *    an ordinary token — a 20-character AWS key is masked, as the test pins.
+ */
+const BINARY_PAYLOAD_MIN = 2048;
+const BASE64_RUN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+
+function isBinaryPayload(parent: Record<string, unknown> | unknown[], key: string, value: string): boolean {
+  if (key === "data" && !Array.isArray(parent)) {
+    const mime = parent.mimeType;
+    if (typeof mime === "string" && mime !== "" && !/^text\//i.test(mime)) return true;
+    const type = parent.type;
+    if (typeof type === "string" && /^(?:image|audio|video)$/i.test(type)) return true;
+  }
+  if (value.length < BINARY_PAYLOAD_MIN) return false;
+  if (value.length % 4 === 1) return false;
+  return BASE64_RUN.test(value);
+}
+
+/**
  * One iterative deep-walk shared by scrubDeep and redactAllText.
  *
  * EXPLICIT STACK, NOT RECURSION, and that is load-bearing rather than stylistic. The
  * recursive version died at ~5000 levels with `RangeError: Maximum call stack size
  * exceeded` (measured, not theoretical — a model can emit a tool-call argument nested
  * that deep). A throw inside a pi extension handler is NOT a crash: every one of
- * `emitMessageEnd`, `emitContext` and `emitBeforeProviderRequest` wraps each handler
- * in try/catch, calls `emitError`, and returns the value it held BEFORE the failing
- * handler ran. So the stack overflow was scrubbing being silently skipped on exactly
- * the two surfaces this design forbids from failing open — the persisted assistant
- * message and the bytes handed to the provider. An unbounded-depth walk turns that
- * class of bug from "impossible" into "reachable".
+ * `emitContext` and `emitBeforeProviderRequest` wraps each handler in try/catch,
+ * calls `emitError`, and returns the value it held BEFORE the failing handler ran. So
+ * the stack overflow was scrubbing being silently skipped on exactly the surface this
+ * design forbids from failing open — the bytes handed to the provider. An
+ * unbounded-depth walk turns that class of bug from "impossible" into "reachable".
  *
  * Shallow-copies each container so the caller's object graph is never mutated, and
  * preserves non-string leaves and key order exactly as the recursive version did.
@@ -417,9 +511,10 @@ function walkDeep<T>(
   onString: (s: string) => string,
   onHit?: () => void,
   preserveKeys?: ReadonlySet<string>,
+  onSkipBinary?: () => void,
 ): T {
   const isContainer = (n: unknown): n is Record<string, unknown> | unknown[] =>
-    Array.isArray(n) || (n !== null && typeof n === "object");
+    !isOpaque(n) && (Array.isArray(n) || (n !== null && typeof n === "object"));
   const clone = (n: Record<string, unknown> | unknown[]): Record<string, unknown> | unknown[] =>
     Array.isArray(n) ? n.slice() : { ...n };
   const keysOf = (n: Record<string, unknown> | unknown[]): string[] =>
@@ -444,6 +539,13 @@ function walkDeep<T>(
     if (preserveKeys?.has(key)) continue;
     const child = (frame.src as Record<string, unknown>)[key];
     if (typeof child === "string") {
+      // A payload is not text. Rewriting one corrupts it (see isBinaryPayload), so it
+      // is skipped entirely — both passes, fail-closed included — and counted, because
+      // silence here would read as "pi-secret checked and found nothing".
+      if (isBinaryPayload(frame.src, key, child)) {
+        onSkipBinary?.();
+        continue;
+      }
       (frame.dst as Record<string, unknown>)[key] = onString(child);
     } else if (isContainer(child)) {
       const copy = clone(child);
@@ -457,8 +559,13 @@ function walkDeep<T>(
   return out as T;
 }
 
-export function scrubDeep<T>(value: T, vault: SecretProvider, opts?: ScrubOptions): { value: T; hits: number } {
+export function scrubDeep<T>(
+  value: T,
+  vault: SecretProvider,
+  opts?: ScrubOptions,
+): { value: T; hits: number; skippedBinary: number } {
   let hits = 0;
+  let skippedBinary = 0;
   const scrubbed = walkDeep(
     value,
     (s) => {
@@ -470,16 +577,70 @@ export function scrubDeep<T>(value: T, vault: SecretProvider, opts?: ScrubOption
       /* hits accumulates in the closure above */
     },
     opts?.preserveKeys,
+    () => {
+      skippedBinary++;
+    },
   );
-  return { value: scrubbed, hits };
+  return { value: scrubbed, hits, skippedBinary };
 }
 
 /**
- * The fail-closed fallback (spec §11): replace EVERY string leaf with the redaction
+ * The keys a redaction must NOT touch, because the provider validates them.
+ *
+ * Fail-closed used to replace every string in the payload. That is correct for prose and
+ * fatal for structure: `role: "user"` becomes `role: "{{sec:redacted}}"` and the request
+ * is rejected — so the one time the fallback fires it converts a redaction into a 400,
+ * which is precisely the workflow break this project refuses to cause. These fields are
+ * enums and identifiers, never prose, so nothing is lost by leaving them alone.
+ */
+const STRUCTURAL_KEYS: ReadonlySet<string> = new Set([
+  "role",
+  "type",
+  "mimeType",
+  "name",
+  "id",
+  "toolCallId",
+  "tool_call_id",
+  "index",
+  "status",
+  "model",
+  "api",
+  "provider",
+  "stopReason",
+  "finish_reason",
+]);
+
+/**
+ * Redact one string, keeping any JSON inside it parseable.
+ *
+ * A tool call's `arguments` can travel as a JSON *string*, and a bare marker in that
+ * position is not valid JSON — another 400 from the last-resort path. Parsing and
+ * re-serialising with the leaves redacted keeps the field usable and loses no
+ * protection: the secret was inside a string leaf either way.
+ */
+function redactStringKeepingJson(s: string): string {
+  const t = s.trimStart();
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      return JSON.stringify(walkDeep(JSON.parse(s) as unknown, () => GENERIC));
+    } catch {
+      // Not JSON after all; fall through to the plain marker.
+    }
+  }
+  return GENERIC;
+}
+
+/**
+ * The fail-closed fallback (spec §11): replace every string leaf with the redaction
  * marker, using the same unbounded-depth walk so it cannot itself throw. Used when
  * scrubDeep raises — over-redacting costs the model some context, under-redacting
  * costs the user the credential, so the bias is deliberate and one-directional.
+ *
+ * Bounded by the two rules above: binary payloads pass through (rewriting them would
+ * corrupt the image) and the provider's structural fields are preserved (rewriting them
+ * would reject the request). Prose — the only place a secret can actually hide — is
+ * still redacted wholesale.
  */
 export function redactAllText<T>(value: T): T {
-  return walkDeep(value, () => GENERIC);
+  return walkDeep(value, redactStringKeepingJson, undefined, STRUCTURAL_KEYS);
 }

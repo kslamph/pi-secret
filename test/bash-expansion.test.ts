@@ -344,8 +344,11 @@ describe("prose refs: a non-resolving ref in a non-expanding context is prose (Â
     expect(out.missing).toEqual(["gh_pat"]);
   });
 
-  it("the scrubber's reserved marker is never prose, even non-resolving", () => {
+  it("the scrubber's reserved marker is prose: no value is ever behind it", () => {
+    // Changed 2026-10-10. Excluding the reserved marker from `prose` made the command
+    // fail, not just the ref, and the marker appears in every masked tool result and in
+    // this project's own documentation. It is not a value denied delivery.
     const out = expandBash("cat <<'EOF'\n{{sec:redacted}}\nEOF", resolve);
-    expect(out.missing).toEqual(["redacted"]);
+    expect(out.missing).toEqual([]);
   });
 });

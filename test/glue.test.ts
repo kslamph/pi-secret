@@ -429,9 +429,15 @@ describe("injectToolCall — write/edit ref gate (§12h)", () => {
     expect(out.notify).toMatch(/docs\/design\.md/);
   });
 
-  it("a heredoc carrying the reserved marker is still refused", () => {
+  it("a heredoc carrying the reserved marker RUNS — the marker backs no value", () => {
+    // Changed 2026-10-10. This used to be refused, on the reasoning that the marker
+    // means "a masked value is being written somewhere". It does not: nothing resolves
+    // from `sec:redacted`, so refusing protected nothing and blocked ordinary work —
+    // including editing this project's own docs and tests, which are full of it. The
+    // heredoc-into-a-file mistake is still reported by the user-only redirect warning.
     const out = injectBashCommand("cat <<'EOF'\n{{sec:redacted}}\nEOF", makeVault());
-    expect(out.block?.reason).toMatch(/will not expand it/);
+    expect(out.block).toBeUndefined();
+    expect(out.command).toContain("{{sec:redacted}}");
   });
 
   it("a ref in the path field is refused whatever the target class", () => {

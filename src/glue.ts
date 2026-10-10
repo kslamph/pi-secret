@@ -240,6 +240,12 @@ export interface ScrubOutcome {
   content: unknown[];
   details?: unknown;
   hits: number;
+  /**
+   * Binary payloads left untouched (image/audio blocks, long base64 runs). Counted so
+   * the caller can tell the user, because "nothing was masked" and "we could not mask
+   * a screenshot" look identical from the outside — and only one of them is true.
+   */
+  skippedBinary: number;
 }
 
 export function scrubToolResult(
@@ -263,15 +269,18 @@ export function scrubToolResult(
       content: content.value as unknown[],
       details: details?.value,
       hits: content.hits + (details?.hits ?? 0),
+      skippedBinary: content.skippedBinary + (details?.skippedBinary ?? 0),
     };
   } catch {
     // Fail closed (§11): an unverified block must not reach the model or the log.
+    // Note the payload blocks are passed through rather than blanked — a fail-closed
+    // image is a corrupt image, and corrupt is how this whole bug started.
     const masked = event.content.map((block) =>
       block && typeof block === "object" && "text" in block
         ? { ...(block as Record<string, unknown>), text: "{{sec:redacted}}" }
         : block,
     );
-    return { content: masked, details: undefined, hits: 0 };
+    return { content: masked, details: undefined, hits: 0, skippedBinary: 0 };
   }
 }
 

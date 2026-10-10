@@ -86,8 +86,10 @@ and that would put it back in the transcript.
   are gone on `/new`, `/fork`, `/resume` and exit. `/sec off` clears them immediately, and asks first.
 - **Autocomplete.** Typing the ref prefix in the editor completes from the vault — names only, never
   values.
-- **Model-facing list.** `sec_list` tells the model which names exist, with a masked preview and the
-  length. There is no reveal tool, and there never will be one.
+- **Model-facing list.** `sec_list` tells the model which names exist, with the length. No part of a
+  value is included — the masked preview you see in `/sec list` is for humans only, because the
+  tool's output is sent to the provider and a head-and-tail slice is still part of the secret. There
+  is no reveal tool, and there never will be one.
 
 ## `/sec`
 
@@ -180,12 +182,19 @@ For a hostile endpoint the answer is a sandbox boundary with egress substitution
 
 ### Known gaps
 
-1. **Transformed secrets can escape masking.** `base64 | cut` in combination, hashing, or a slice
+1. **Image and other binary content is never filtered.** pi hands the model a screenshot as base64;
+   rewriting that string is not masking, it is corruption, and a corrupted image is rejected by the
+   provider (`400 invalid_request` — measured 2026-10-10, where an AWS-key shape matched inside the
+   base64 and took the next request down with it). So binary payloads pass through byte-identical and
+   pi-secret says so when it happens. **A secret visible inside a screenshot still reaches the
+   provider**, because redacting pixels needs OCR and this layer has none. Masking the prose around
+   an image still works.
+2. **Transformed secrets can escape masking.** `base64 | cut` in combination, hashing, or a slice
    taken mid-encoding degrades to masked-up-to-the-wrap. Shape matching is hygiene, not a boundary.
-2. **`!` user-bash output is not captured** into the vault.
-3. **A child process's environment is readable by the same user** (above) — a file-descriptor
+3. **`!` user-bash output is not captured** into the vault.
+4. **A child process's environment is readable by the same user** (above) — a file-descriptor
    handoff would avoid it and needs spawn support from pi.
-4. **File imports are dotenv only** — no JSON/YAML/INI, and no `$VAR` interpolation: values are
+5. **File imports are dotenv only** — no JSON/YAML/INI, and no `$VAR` interpolation: values are
    stored exactly as written and flagged when they contain an unexpanded reference.
 
 ## Development

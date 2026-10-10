@@ -208,6 +208,58 @@ describe("canary sweep", () => {
     expect(corpus).not.toContain(CANARY);
   });
 
+  // Regression, 2026-10-10: reading a PNG produced "masked 4 secret occurrence(s) in
+  // read output" and the NEXT provider request came back 400 invalid_request. The AWS
+  // prefix rule matched case-insensitively inside the base64 payload, and the rewrite
+  // left data that no longer decoded — so the provider was handed a broken image.
+  //
+  // The fixture is built so the bug is REACHABLE: the 15 bytes encoding the AWS key
+  // shape are appended at a 3-aligned offset, so their base64 spelling survives as a
+  // literal in the payload. Verified with the guard disabled: this test fails there,
+  // which is the only reason to believe it.
+  it("hands the provider an image that still decodes", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    // base64 emits whole 4-char groups per 3 input bytes; pad so the appended 15 bytes
+    // start on a group boundary and encode to the literal string, not a shifted one.
+    const pad = (3 - (png.length % 3)) % 3;
+    const awsShape = "AkIA8BxxiyzGikq3xhqm";
+    const fixture = Buffer.concat([png, Buffer.alloc(pad), Buffer.from(awsShape, "base64")]);
+    expect(fixture.toString("base64")).toContain(awsShape);
+    writeFileSync(join(cwd, "shot.png"), fixture);
+
+    const wire: unknown[] = [];
+    const harness = await makeSecureSession({
+      cwd,
+      onProviderPayload: (payload) => {
+        wire.push(payload);
+      },
+      responses: [
+        fauxAssistantMessage([fauxToolCall("read", { path: "shot.png" })]),
+        fauxAssistantMessage("done"),
+      ],
+    });
+    teardown.push(() => harness.dispose());
+    seedVault(harness.sessionFile() ?? "ephemeral");
+
+    await harness.session.prompt("look at the screenshot");
+
+    const json = JSON.stringify(wire);
+    // Non-vacuity, stated as the precondition it is: the shape that used to corrupt the
+    // payload really is in there, byte for byte.
+    expect(json).toContain(awsShape);
+    expect(json).toContain('"mimeType":"image/png"');
+    const data = /"data":"([A-Za-z0-9+/=]+)"/.exec(json)?.[1] ?? "";
+    expect(data.length).toBeGreaterThan(0);
+    expect(data).toContain(awsShape);
+    const bytes = Buffer.from(data, "base64");
+    expect(bytes.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+    expect(bytes.equals(fixture)).toBe(true);
+  });
+
   it("nothing canary-shaped survives in any artifact", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "canary-"));
     const harness = await makeSecureSession({

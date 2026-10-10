@@ -72,8 +72,32 @@ const KV_COLON = String.raw`["'\x60]?[ \t]*:[ \t]*`;
  * The keyword, at a SEGMENT boundary, so `my_key=` matches while `monkey=`, `turnkey=` and
  * `keyboard=` do not. Kept as a source string because four rules share it now and a
  * divergence between them would be invisible.
+ *
+ * The `{0,32}` bounds on both runs are load-bearing, not cosmetic. With an unbounded
+ * `*` this pattern is O(n²) in the length of one word-character run — at every start
+ * position the engine eats the whole run and backtracks character by character hunting a
+ * keyword that is not there. Measured 2026-10-10: 1MB of `a` did not finish in 6
+ * seconds, and this runs on EVERY user prompt (the `input` hook), so a paste containing
+ * one long unbroken word froze the editor. 32 is generous for a key NAME; the value
+ * classes below are untouched.
  */
-const KV_KEYWORD_SOURCE = String.raw`([A-Za-z0-9_\-]*(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]*)`;
+const KV_KEYWORD_SOURCE = String.raw`([A-Za-z0-9_\-]{0,32}(?<![A-Za-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|access[_-]?key|credential|cred|url|auth|key)(?![A-Za-z0-9_-])[A-Za-z0-9_\-]{0,32})`;
+
+/**
+ * Any sensitive word at all — a cheap, non-backtracking gate in front of the KV family.
+ *
+ * Six regex passes are skipped outright when this fails, which is what makes a large
+ * paste with no credential-shaped word in it free rather than merely slow. The run
+ * bounds above make each pass linear; this makes them unnecessary.
+ *
+ * It must cover EVERY keyword any rule can fire on, or the gate becomes a recall bug:
+ * the first version of this line listed only the ASCII words, and the Chinese rules
+ * (密码/口令/密钥/秘钥/令牌/私钥, KV_CJK_RE) silently stopped firing. Measured by the
+ * existing suite — three tier-2 capture tests went red — which is exactly why the gate
+ * is built from the same word list the rules use and is checked by those tests.
+ */
+const KV_ANY_RE =
+  /(?:token|secret|password|passwd|pwd|passphrase|private|api[_-]?key|access[_-]?key|auth[_-]?token|authorization|credential|cred|url|auth|key|密码|口令|密钥|秘钥|令牌|私钥)/i;
 
 // A: the BARE value stops at whitespace and quotes and deliberately ALLOWS `&` and `\`,
 // because excluding them leaked a credential's tail in the clear.
@@ -383,6 +407,30 @@ function isDataUriPayload(text: string, idx: number): boolean {
   return /^data:[^\s]*;base64,?$/i.test(runBefore);
 }
 
+/**
+ * Every occurrence of every whitespace/delimiter-separated token, in first-appearance
+ * order, with its offsets — built in ONE pass over the text.
+ *
+ * This replaces `new Set(text.split(...))` followed by `text.indexOf(raw)` per token,
+ * which is O(tokens x text length): `indexOf` restarts from position 0 every time, so a
+ * paste of N tokens cost N full scans. Measured 2026-10-10: a 414KB prompt took 2.6
+ * SECONDS to examine, on every submission, because the `input` hook calls this; the cost
+ * grows with the square of the paste. One pass makes it linear.
+ *
+ * The token set is identical to `split` on the complementary class — the split's empty
+ * strings are dropped here by construction — so this is a cost fix, not a behaviour one.
+ */
+function tokenOccurrences(text: string): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  const re = /[^\s,"'()[\]{}<>=;]+/g;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    const list = out.get(m[0]);
+    if (list) list.push(m.index);
+    else out.set(m[0], [m.index]);
+  }
+  return out;
+}
+
 export function findCandidates(text: string): Candidate[] {
   if (!text.trim()) return [];
   const reserved: Array<{ start: number; end: number }> = findRefs(text).map((r) => ({
@@ -408,7 +456,12 @@ export function findCandidates(text: string): Candidate[] {
   // inside a credential (see extendKvToToken for the over-capture rationale). C: a quoted
   // value keeps its whole interior and is NOT extended — the closing quote is its boundary.
   // G: trim stray delimiters from both ends of every KV value.
-  for (const rule of KV_RULES) found.push(...collectKv(text, rule, rule.re === KV_BARE_RE));
+  // The gate is not an optimisation detail: without it these six passes run over every
+  // user prompt and every tool result, and a paste with no credential-shaped word in it
+  // pays for six full regex scans to find nothing.
+  if (KV_ANY_RE.test(text)) {
+    for (const rule of KV_RULES) found.push(...collectKv(text, rule, rule.re === KV_BARE_RE));
+  }
 
   // J: the deny list applies ONLY to entropy candidates. A key that says `token=` is evidence
   // of intent; a bare hex blob is not. So a legacy 40-hex PAT behind `token=` is captured, not
@@ -453,37 +506,35 @@ export function findCandidates(text: string): Candidate[] {
     if (isPlaceholderValue(cand.value) || looksLikeSecretReference(cand.value)) return;
     kept.push(cand);
   };
-  for (const raw of new Set(text.split(/[\s,"'()[\]{}<>=;]+/))) {
-    if (!raw) continue;
+  for (const [raw, offsets] of tokenOccurrences(text)) {
     if (DENY_RE.test(raw)) continue;
-    let idx = text.indexOf(raw);
-    while (idx !== -1) {
+    for (const idx of offsets) {
       // V(c): re-attach padding for THIS occurrence so a padded occurrence cannot supply padding
       // to an unpadded one of the same raw.
       const token = reattachBase64PaddingAt(text, raw, idx);
-      if (base.some((c) => token.includes(c.value) || c.value.includes(token))) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (base.some((c) => token.includes(c.value) || c.value.includes(token))) {  continue; }
       // S: scheme-prefixed token — capture only if credential-bearing (userinfo / cred query);
       // benign scheme links stay skipped.
       if (/^[a-z][a-z0-9+.-]*:\/\//.test(token)) {
         if (isCredentialUrl(token)) pushEntropy(token, idx);
-        idx = text.indexOf(raw, idx + raw.length);
+        
         continue;
       }
       // remaining non-// scheme forms (file:, git:, ssh:, node:) are not credentials here
-      if (/^(?:https?|file|git|ssh|node):/i.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (/^(?:https?|file|git|ssh|node):/i.test(token)) {  continue; }
       // M: replace the old `token.includes("/")` ban (which also banned the base64 alphabet: random
       // bytes average >1 `/` per 22 chars) with a shape test. Reject only a token that STARTS with a
       // filesystem path stem; a bare base64 blob (`CzBVep/E6RM...`) starts with neither, so it is no
       // longer lost.
-      if (/^(?:\.\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (/^(?:\.\.?\/|~[\/\\]|[A-Za-z]:[\/\\])/.test(token)) {  continue; }
       const ent = shannonEntropy(token);
       // A token that is valid base64 (standard or url-safe alphabet) is a credential candidate on its
       // entropy alone — looksCredentialish's own `/^[A-Za-z0-9._/-]+$/ && includes("/") rule rejects
       // base64-with-slash, so without this bypass the entropy fallback would still miss every real
       // blob. scrub.ts is out of scope for this task, so the bypass lives here.
       const base64ish = /^[A-Za-z0-9+/]+=*$/.test(token) || /^[A-Za-z0-9_-]+=?$/.test(token);
-      if (token.length < 20 || ent <= 3.9) { idx = text.indexOf(raw, idx + raw.length); continue; }
-      if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (token.length < 20 || ent <= 3.9) {  continue; }
+      if (!looksCredentialish(token) && !(base64ish && ent > 3.9)) {  continue; }
       // The three gates added on 2026-10-09, each answering a measured false positive.
       //
       // 1. ASCII only. A Chinese prompt has no spaces, so its runs are long, and Shannon
@@ -493,19 +544,19 @@ export function findCandidates(text: string): Candidate[] {
       //    Latin brand name in it, which is what supplied the second character class that
       //    looksCredentialish requires. A real pasted credential that contains non-ASCII is
       //    vanishingly rare next to how often ordinary Chinese prose reaches this line.
-      if (/[^\x20-\x7E]/.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (/[^\x20-\x7E]/.test(token)) {  continue; }
       // 2. Not built out of words. `NewPaymentCaseReconcilerFromContext` scored 4.14 bits/char
       //    — HIGHER than the secret it was mistaken for — so entropy was never going to
       //    separate them. Structure does: names are word runs, random bytes are not.
-      if (looksLikeIdentifierText(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (looksLikeIdentifierText(token)) {  continue; }
       // 3. Shape rules that separate a random token from a CONSTANT. Written as four
       //    small tests rather than "must have lower, upper and a digit", because that
       //    blunter form was measured losing a real secret: a 29-character all-lowercase
       //    token with digits is an ordinary base64 blob, and it has no uppercase at all.
       //    What actually identifies a constant is that it has no digits, or is hex.
-      if (/^[0-9a-f]+$/i.test(token)) { idx = text.indexOf(raw, idx + raw.length); continue; }
+      if (/^[0-9a-f]+$/i.test(token)) {  continue; }
       if (!/[a-z]/.test(token) && !/[0-9]/.test(token)) {
-        idx = text.indexOf(raw, idx + raw.length); // ALL-CAPS word, e.g. an env var name
+         // ALL-CAPS word, e.g. an env var name
         continue;
       }
       // 4. A snake/kebab CONSTANT: no digits anywhere, and every segment a plain word.
@@ -515,12 +566,12 @@ export function findCandidates(text: string): Candidate[] {
       if (!/[0-9]/.test(token)) {
         const segs = token.split(/[_-]/).filter(Boolean);
         if (segs.length >= 3 && segs.every((s) => /^[A-Za-z]{2,}$/.test(s))) {
-          idx = text.indexOf(raw, idx + raw.length);
+          
           continue;
         }
       }
       pushEntropy(token, idx);
-      idx = text.indexOf(raw, idx + raw.length);
+      
     }
   }
   return kept.sort((a, b) => a.start - b.start);
