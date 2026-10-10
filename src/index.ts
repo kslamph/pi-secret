@@ -19,6 +19,7 @@ import { RECEIPT_TYPE, buildReceiptComponent, type Receipt, type ReceiptItem } f
 import { fingerprint } from "./refs.ts";
 import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
+import { withPiSecretPrompt } from "./prompt.ts";
 
 export const VERSION = "0.4.1";
 
@@ -247,6 +248,15 @@ export default function piSecret(pi: ExtensionAPI): void {
     // every other reason is a different session and must not inherit these values.
     if (reason && reason !== "reload") dropSessionVault(sessionScope(ctx));
     if (ctx.hasUI) ctx.ui.setStatus("pi-secret", undefined);
+  });
+
+  /**
+   * The model's guide to pi-secret (src/prompt.ts, spec §12k). Only while on: with /sec off
+   * nothing is substituted or masked, and a prompt describing refs would be false.
+   */
+  pi.on("before_agent_start", async (event) => {
+    if (!isEnabled()) return undefined;
+    return { systemPrompt: withPiSecretPrompt(event.systemPrompt) };
   });
 
   pi.on("input", async (event, ctx) => {

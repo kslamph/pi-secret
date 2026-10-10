@@ -82,6 +82,6 @@ export function bashRefIssues(
       problem:
         r.disposition === "inert" || vault.has(r.name)
           ? `{{sec:${r.name}}} sits in a shell context that will not expand it (quoted heredoc body, or an unterminated quote). Move it outside, or pass it via an environment variable.`
-          : `sec:${r.name} not found. Available: ${names.length ? names.map((n) => `sec:${n}`).join(", ") : "(none — run /sec add)"} Values are never shown.`,
+          : `sec:${r.name} not found. Available: ${names.length ? names.map((n) => `sec:${n}`).join(", ") : "(none — ask the user to run /sec add NAME)"} Values are never shown.`,
     }));
 }

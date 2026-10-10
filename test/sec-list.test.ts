@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PI_SECRET_PROMPT } from "../src/prompt.ts";
 import { createSecListTool } from "../src/tools/sec-list.ts";
 import { Vault } from "../src/vault.ts";
 
@@ -31,26 +32,18 @@ describe("sec_list", () => {
     expect(joined).toMatch(/[Nn]ever ask the user/);
   });
 
-  it("tells the model what a masked credential IS, and what to do instead", async () => {
-    // Driven by a real session (2026-10-10): a grep of ~/.bashrc came back masked and the
-    // model spent seven thinking blocks unable to tell a redaction from file content, then
-    // hunted for the credential with od/xxd pipelines. Since 2026-10-11 shape matches come
-    // back as usable refs, so the guideline must say: it is not file content, use the ref,
-    // recovery is a leak, and only the marker needs /sec add.
+  it("keeps the core rules as a fallback for hosts without the system-prompt section", async () => {
+    // The full guide is src/prompt.ts. These must hold even where before_agent_start never
+    // fires: the syntax, never paste, a ref in output is usable and never recovered, and the
+    // read-tool path for credential files.
     const joined = (createSecListTool(() => vaultWith()).promptGuidelines ?? []).join("\n");
+    expect(joined).toMatch(/\{\{sec:NAME\}\}/);
+    expect(joined).toMatch(/\/sec add NAME/);
+    expect(joined).toMatch(/Never ask the user to paste/);
     expect(joined).toMatch(/not file content/);
-    expect(joined).toMatch(/Use the ref directly/);
-    expect(joined).toMatch(/od, xxd, base64, sed/); // names the exact transforms it must not try
-    expect(joined).toMatch(/leaks it/);
-    expect(joined).toMatch(/Only \{\{sec:redacted\}\} is unusable/);
-    expect(joined).toMatch(/\/sec add/);
-    // Prevention: verify and consume without printing.
-    expect(joined).toMatch(/Avoid commands that print credential values/);
+    expect(joined).toMatch(/od, xxd, base64/);
     expect(joined).toMatch(/--password-stdin/);
-    // Diagnosis must stay possible, restricted to the FACTS about a value.
-    expect(joined).toMatch(/print only its properties/);
-    expect(joined).toMatch(/length, prefix class, quoting, trailing whitespace/);
-    expect(joined).toMatch(/never the value itself/);
+    expect(joined).toMatch(/read tool \(not cat in bash\)/);
   });
 
   it("marks entries adopted from tool output", async () => {
@@ -61,7 +54,8 @@ describe("sec_list", () => {
   });
 
   it("warns against the nested-shell expansion trap", async () => {
-    const joined = (createSecListTool(() => vaultWith()).promptGuidelines ?? []).join("\n");
+    // Moved to the system-prompt section with the rest of the full guide (spec §12k).
+    const joined = PI_SECRET_PROMPT;
     // A value interpolated into a string a second shell parses becomes SOURCE.
     expect(joined).toMatch(/sh -c|eval/);
   });

@@ -24,25 +24,13 @@ export function createSecListTool(getVault: () => Vault): ToolDefinition {
     description:
       "List the secret references available in this session. Values are never shown; reference them as {{sec:NAME}} in bash commands or tool arguments.",
     promptSnippet: "List {{sec:NAME}} secret references available in this session",
+    // The full guide is the <pi_secret> system-prompt section (src/prompt.ts, spec §12k).
+    // These are the rules that must hold even where that section is absent: a host that never
+    // fires before_agent_start still lists sec_list, and with it these lines.
     promptGuidelines: [
-      "Use {{sec:NAME}} in bash commands and tool arguments wherever a credential is needed; sec_list shows the valid NAMEs and the value is substituted at execution time, which you never see.",
-      "Use sec_list to find the right secret name before running a command that needs one; if a sec: reference is rejected, run sec_list and retry with a listed name.",
-      "Never ask the user to paste a secret, token, password or API key — sec_list is the only source of credentials.",
-      // Prevention. The cheapest leak to handle is the one that never prints: the model
-      // usually CAN verify or consume a credential without echoing it, it just reaches for
-      // `cat`/`echo` first. Naming the alternatives is what changes that habit.
-      "Avoid commands that print credential values. Check a credential without showing it (test -n \"$TOKEN\", printf '%s' \"${#TOKEN}\", gh auth status, aws sts get-caller-identity) and pass it straight to its consumer (TOKEN=$(gh auth token) cmd, a pipe, --password-stdin) instead of echoing it.",
-      // The cure, rewritten 2026-10-11. The previous text told the model a masked value was
-      // "never recoverable" and to ask the user for /sec add, because masked shapes all became
-      // {{sec:redacted}}. A session on 2026-10-10 spent seven thinking blocks guessing what
-      // that marker meant and then hunted the value with od/xxd. Shape matches are now stored
-      // in the vault and come back as usable refs, so the instruction is simply: use it.
-      "pi-secret is active: a credential that appears in tool output is shown to you as a {{sec:NAME}} ref; the real value is kept for this session. It is not file content. Use the ref directly in your next bash command or tool argument and it behaves exactly like the value. Do not try to recover the value with od, xxd, base64, sed or slicing; that bypasses the mask and leaks it. Only {{sec:redacted}} is unusable; if you need that credential, ask the user to run /sec add.",
-      // §12j. Without this the model avoids editing a credential file it has read, or rewrites
-      // the ref line by hand; it does not know the ref goes back in for that file.
-      "When you edit or write a file you read with the read tool, keep its {{sec:NAME}} refs as they are: a ref read from that file is written back into it as the real value. A ref written into any other file is refused.",
-      "To diagnose a rejected credential, print only its properties — length, prefix class, quoting, trailing whitespace — computed inside the command (e.g. printf '%s' \"${#T}\"), never the value itself; keep the value in the shell.",
-      'Never expand a {{sec:NAME}} ref inside a string that a second shell will parse — sh -c, bash -c, eval, ssh host "...", docker exec ... sh -c. There the expanded value is treated as source and can execute; export it for the inner command instead, e.g. PISEC="$__PISEC_GH_PAT" sh -c \'curl -H "Authorization: Bearer $PISEC"\'.',
+      "Use {{sec:NAME}} in bash commands and tool arguments wherever a credential is needed; the value is substituted at execution time and you never see it. sec_list lists the NAMEs; if a credential is missing, ask the user to run /sec add NAME. Never ask the user to paste a secret.",
+      "A {{sec:NAME}} ref in tool output is a credential pi-secret masked, not file content; use it like the value. Never recover a value with od, xxd, base64, cut or slicing, and never print one: check with test -n or ${#VAR}, and consume it through a pipe or --password-stdin.",
+      "To edit a file that holds credentials, open it with the read tool (not cat in bash) and keep its refs as read; they go back into that file as the real values. Refs written to any other file are refused. A refusal's reason names the fix.",
     ],
     parameters: Type.Object({}),
     async execute() {

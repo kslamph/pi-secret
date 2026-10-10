@@ -61,7 +61,7 @@ describe("injectBashCommand", () => {
 describe("injectToolCall", () => {
   it("blocks refs in file-writing tools", () => {
     const out = injectToolCall("write", { path: ".env", content: `T={{sec:gh_pat}}` }, makeVault());
-    expect(out.blocked?.reason).toMatch(/not written to files/);
+    expect(out.blocked?.reason).toMatch(/would store the\s+placeholder text/);
     expect(out.expanded).toEqual([]);
   });
 
@@ -299,7 +299,7 @@ describe("injectToolCall — vaulted LITERALS in tool arguments", () => {
   // Refusing is the honest response; silently accepting helps the leak travel.
   it("blocks a write carrying the literal value, not just a ref", () => {
     const out = injectToolCall("write", { path: ".env", content: `TOKEN=${GH}` }, makeVault());
-    expect(out.blocked?.reason).toMatch(/not written to files|literal/);
+    expect(out.blocked?.reason).toMatch(/would store the\s+placeholder text|literal/);
     expect(out.blocked?.reason).not.toContain(GH);
   });
 
@@ -409,7 +409,7 @@ describe("injectToolCall — write/edit ref gate (§12h)", () => {
 
   it("non-doc target, resolving ref: still refused, and the reason says why it resolves", () => {
     const out = injectToolCall("edit", { path: "config.yml", oldText: "a", newText: "k={{sec:gh_pat}}" }, makeVault());
-    expect(out.blocked?.reason).toMatch(/not written to files/);
+    expect(out.blocked?.reason).toMatch(/would store the\s+placeholder text/);
     expect(out.blocked?.reason).toMatch(/resolves/);
     expect(out.blocked?.reason).not.toContain(GH);
   });

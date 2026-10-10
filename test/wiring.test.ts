@@ -309,7 +309,7 @@ describe("pi-secret wiring", () => {
       reason: string;
     };
     expect(blocked.block).toBe(true);
-    expect(blocked.reason).toMatch(/not written to files/);
+    expect(blocked.reason).toMatch(/would store the\s+placeholder text/);
     expect(blocked.reason).not.toContain(GH);
   });
 
@@ -372,6 +372,19 @@ describe("pi-secret wiring", () => {
       )) as { content: Array<{ text: string }> };
       expect(out.content[0]?.text).toBe("{{sec:redacted}}");
       expect(vaultForSession("/tmp/s.jsonl").size()).toBe(0);
+    } finally {
+      setEnabled(true);
+    }
+  });
+
+  it("appends the <pi_secret> guide to the system prompt only while on", async () => {
+    const h = harness();
+    piSecret(h.pi);
+    const on = (await h.fire("before_agent_start", { prompt: "hi", systemPrompt: "BASE" }, ctx)) as { systemPrompt: string };
+    expect(on.systemPrompt).toMatch(/^BASE\n\n<pi_secret>/);
+    setEnabled(false);
+    try {
+      expect(await h.fire("before_agent_start", { prompt: "hi", systemPrompt: "BASE" }, ctx)).toBeUndefined();
     } finally {
       setEnabled(true);
     }

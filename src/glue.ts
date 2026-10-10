@@ -25,10 +25,17 @@ export interface InjectOutcome {
   env: Record<string, string>;
 }
 
+// Said to the model at the wall, so it carries the fix, not only the rule (spec §12j). A
+// model told only "out of scope" either gives up on a routine .env edit or rewrites the file
+// by hand around the ref.
 const FILE_WRITE_REASON =
-  "sec refs are not written to files (the literal text would be stored, not the value). " +
-  "Materializing secrets into files is out of scope. If this value came from a scrubbed " +
-  "tool result, tell the user where it needs to go and let them place it.";
+  "pi-secret: a {{sec:NAME}} ref is written into a file only if it was read from that same file " +
+  "with the read tool (it then goes back as the real value); here the file would store the " +
+  "placeholder text instead. Fix: if this file holds the credential, open it with the read tool " +
+  "(not cat or grep in bash) and retry; if it still refuses, the file does not hold that value. " +
+  "If the user wants the credential placed in a new file, write it with bash, e.g. " +
+  "printf '%s\\n' \"KEY={{sec:NAME}}\" >> FILE, and the shell substitutes the value. In source " +
+  "code, read it from an environment variable instead of embedding it.";
 
 /*
  * §12h: where quoting the ref SYNTAX is the norm, so the write gate must not fire.
@@ -205,7 +212,11 @@ export function injectToolCall(
     const serialized = JSON.stringify(input) ?? "";
     if (findRefs(serialized).length) {
       return {
-        blocked: { reason: `sec: refs are not a valid path or pattern for ${toolName}.` },
+        blocked: {
+          reason:
+            `sec: refs are not a valid path or pattern for ${toolName}: the value is never substituted there. ` +
+            "Search for the key name (e.g. API_KEY) instead of the credential.",
+        },
         expanded: [],
         env: {},
       };
@@ -275,10 +286,11 @@ export function injectToolCall(
         return {
           blocked: {
             reason:
-              "this text carries the scrubber's marker (sec:redacted): it came out of a masked " +
-              "result, and writing it stores the placeholder, not the value. Tell the user where " +
-              "the value needs to go and let them place it. (Quoting the marker as prose? Doc and " +
-              "test targets allow it; or quote a different placeholder name.)",
+              "pi-secret: this text carries {{sec:redacted}}, the marker for a masked value with " +
+              "nothing behind it, so writing it stores the placeholder. Fix: ask the user to run " +
+              "/sec add NAME and use {{sec:NAME}}, or tell them where the value needs to go. " +
+              "(Quoting the marker as prose? Doc and test targets allow it; or quote a different " +
+              "placeholder name.)",
           },
           expanded: [],
           env: {},

@@ -57,12 +57,14 @@ describe("extension entry", () => {
     // nothing to scrub on the inbound side. A refactor that re-added either would be
     // rewriting the user's transcript again — see src/index.ts.
     //
+    // before_agent_start carries the model's guide to pi-secret (src/prompt.ts, spec §12k).
     // turn_end is here for a different reason: it is where pi-secret measures whether the
     // provider-level payload hook exists at all, and drops that measurement if removed.
     const { api, calls } = stubPi();
     piSecret(api);
     expect(hookNames(calls).sort()).toEqual(
       [
+        "before_agent_start",
         "before_provider_request",
         "context",
         "input",
