@@ -4,7 +4,6 @@ import {
   captureFromText,
   findGuesses,
   injectToolCall,
-  scrubCompactionSummaryFile,
   scrubDeepFailClosed,
   scrubOutputSnapshot,
   scrubToolResult,
@@ -19,7 +18,7 @@ import { fingerprint } from "./refs.ts";
 import { isEnabled, isDeclined, declineValue, resetDeclined } from "./state.ts";
 import { registerCommands } from "./commands.ts";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 /**
  * "Session" means one session FILE (spec §7). Keying the vault by it is what makes
@@ -316,29 +315,18 @@ export default function piSecret(pi: ExtensionAPI): void {
   });
 
   /**
-   * The assistant's own message is persisted BEFORE any tool result exists, so
-   * `tool_result` cannot clean it. If the model ever emits a secret literally in a
-   * tool-call argument — which it should never be able to, since refs are the only
-   * thing it can see — that literal lands in the session JSONL, and from there in
-   * /export and every resume.
+   * NOTHING is hooked on the model's own output. Deliberate, not an omission.
    *
-   * pi runs message_end handlers BEFORE appendMessage and rewrites the finalized
-   * message object in place, so returning a scrubbed copy here is what keeps the
-   * literal off disk. Blocking the tool call would not help: the model has already
-   * written the message, and refusing to run it leaves the text in the transcript.
-   *
-   * This is the round-trip property applied to the model's own output: the value is
-   * replaced by its ref, so a command written with a literal still executes — the
-   * spawnHook expands the ref we put back.
+   * The contract is one-directional: a secret must never REACH the endpoint. Text
+   * that came FROM the model is left exactly as the model produced it — no
+   * `message_end` rewrite, no compaction-summary rewrite, no on-disk mending of
+   * the session file. `context` and `before_provider_request` already scrub that
+   * same text on the way out, so filtering it again here bought nothing outbound
+   * and cost a rewritten transcript: a literal the model echoed (only reachable
+   * after a leak upstream, e.g. `sec-file-reads` off) used to be replaced in the
+   * session JSONL, /export and /resume. It now stays verbatim there, and still
+   * never leaves the machine.
    */
-  pi.on("message_end", (event, ctx) => {
-    if (!isEnabled()) return undefined;
-    const out = scrubDeepFailClosed(event.message as unknown, vault(ctx), { shapes: true }, (cls) =>
-      ctx.ui.notify(`pi-secret: message scrub failed closed (${cls})`, "error"),
-    );
-    return out.hits ? { message: out.value as never } : undefined;
-  });
-
   pi.on("before_provider_request", (event, ctx) => {
     // Recorded BEFORE the enabled check on purpose: this measures whether the HOST
     // provides the hook, which is a property of the provider, not of our switch. A
@@ -374,28 +362,6 @@ export default function piSecret(pi: ExtensionAPI): void {
   );
 
 
-
-  /**
-   * Compaction is the ONE model-authored text pi persists without passing it through
-   * `message_end`, so the summary reaches the session file before this extension has
-   * any chance to look at it. The wire is already safe (`context` and
-   * `before_provider_request` both scrub outbound), but the file is the transcript of
-   * record, and a summary outlives the turn that produced it. So the entry is amended
-   * in place, and only when it actually contains something.
-   *
-   * There is no `message_end` for this text and no public API to amend an entry, hence
-   * the targeted rewrite of one JSONL line.
-   */
-  pi.on("session_compact", async (event, ctx) => {
-    const file = ctx.sessionManager.getSessionFile();
-    if (!file) return;
-    const entry = (event as { compactionEntry?: { id?: string } }).compactionEntry;
-    if (!entry?.id) return;
-    const out = scrubCompactionSummaryFile(file, entry.id, vault(ctx));
-    if (out.rewritten && ctx.hasUI) {
-      ctx.ui.notify(`pi-secret masked ${out.hits} secret occurrence(s) in a compaction summary`, "info");
-    }
-  });
 
   registerCommands(pi);
 }

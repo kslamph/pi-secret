@@ -453,73 +453,16 @@ describe("/sec dispatcher", () => {
   });
 });
 
-describe("message_end — the model's own message is persisted before any tool result", () => {
-  // Same reason as the first describe: this file shares session file
-  // "/tmp/s.jsonl", and an earlier capture leaves its own name bound to the shared
-  // canary value, so findByValue would return THAT name rather than the one seeded here.
-  beforeEach(() => {
-    dropSessionVault("/tmp/s.jsonl");
-    setActiveScopeKey(undefined);
-  });
-
-  it("scrubs a literal secret out of an assistant tool-call argument", async () => {
-    // tool_result cannot clean this: the assistant message is written to the
-    // session file first. pi runs message_end before appendMessage and rewrites
-    // the finalized message in place, so this is the only place it can be caught.
-    const h = harness();
-    piSecret(h.pi);
-    await h.fire("session_start", { reason: "startup" }, ctx);
-    setActiveScopeKey("/tmp/s.jsonl");
-    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
-    const message = {
-      role: "assistant",
-      content: [{ type: "toolCall", name: "bash", arguments: { command: `printf %s "${GH}"` } }],
-    };
-    const out = (await h.fire("message_end", { message }, ctx)) as { message: typeof message } | undefined;
-    expect(JSON.stringify(out?.message)).not.toContain(GH);
-    expect(out?.message.content[0]?.arguments?.command).toContain("{{sec:gh_pat}}");
-  });
-
-  it("leaves a clean message untouched (no spurious rewrite)", async () => {
-    const h = harness();
-    piSecret(h.pi);
-    await h.fire("session_start", { reason: "startup" }, ctx);
-    setActiveScopeKey("/tmp/s.jsonl");
-    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
-    const message = { role: "assistant", content: [{ type: "text", text: "all clear" }] };
-    expect(await h.fire("message_end", { message }, ctx)).toBeUndefined();
-  });
-});
-
-// --- Review 2026-10-08, finding C1 (the three unguarded hooks) --------------------
 // pi's ExtensionRunner swallows a throwing handler and returns the value it held
-// BEFORE the handler ran (runner.js: emitMessageEnd / emitContext /
-// emitBeforeProviderRequest each try/catch per handler and keep `current*`). For
-// these three hooks an exception therefore does not crash the turn — it silently
-// skips scrubbing on the persisted assistant message and on the bytes sent to the
-// provider. A vault whose `values()` throws is the cheapest faithful way to make
-// the scrubber throw from inside the hook.
-describe("the three hooks pi would silently skip on a throw", () => {
-  it("message_end redacts rather than returning the untouched message", async () => {
-    const h = harness();
-    piSecret(h.pi);
-    setActiveScopeKey("/tmp/s.jsonl");
-    vaultForSession("/tmp/s.jsonl").add("gh_pat", GH, "prompt");
-    // Make the live session vault's value enumeration throw.
-    const live = vaultForSession("/tmp/s.jsonl");
-    Object.defineProperty(live, "values", {
-      value: () => { throw new RangeError("simulated scrubber failure"); },
-      configurable: true,
-    });
-    const out = (await h.fire("message_end", { message: { role: "assistant", content: `deployed ${GH}` } }, ctx)) as {
-      message: { content: string };
-    };
-    expect(out).toBeDefined();
-    expect(JSON.stringify(out)).not.toContain(GH);
-    expect(JSON.stringify(out)).toContain("{{sec:redacted}}");
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("failed closed"), "error");
-  });
-
+// BEFORE the handler ran (runner.js: emitContext / emitBeforeProviderRequest each
+// try/catch per handler and keep `current*`). For these two hooks an exception
+// therefore does not crash the turn — it silently skips scrubbing on the bytes sent
+// to the provider. A vault whose `values()` throws is the cheapest faithful way to
+// make the scrubber throw from inside the hook.
+//
+// emitMessageEnd is deliberately absent: nothing the MODEL produced is filtered, so
+// there is no third outbound hook to lose. See src/index.ts.
+describe("the two outbound hooks pi would silently skip on a throw", () => {
   it("before_provider_request redacts rather than returning the untouched payload", async () => {
     const h = harness();
     piSecret(h.pi);

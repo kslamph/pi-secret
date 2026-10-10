@@ -9,6 +9,13 @@ substituted only at the moment the command runs.
 Nothing else changes. Your token is not in the prompt, not in the request body, not in the session
 file, not in `/export`, not in a resumed transcript. But the command that needs it still works.
 
+> **Scope, since 0.4:** the protection is one-directional — it covers what goes **to** the provider,
+> and nothing else. Text the model itself produced is stored and displayed exactly as the model wrote
+> it. There is no `message_end` rewrite and no compaction-summary amendment, so if a value ever
+> reaches the model (you turned `sec-file-reads` off, or a tool the scrubber does not cover printed
+> one) and the model repeats it, that repeat stays in the transcript — while still never being sent
+> anywhere. See [Security model](#security-model--read-this).
+
 ```
 you:    /sec add github_token          →  paste it once, masked
 model:  curl -H "Authorization: Bearer {{sec:github_token}}" https://api.github.com/user
@@ -132,9 +139,13 @@ Three ideas, and the interesting one is the third:
 3. **Expansion at the last moment.** For a bash call, the ref is rewritten to a per-call environment
    variable that exists only in that child process.
 
-Every outbound surface is then scrubbed as a backstop: `tool_result`, `context`, `message_end` and
-`before_provider_request`, plus pi's truncated-output snapshots and compaction summaries (the one
-model-authored text pi persists without passing through `message_end`).
+Every **outbound** surface is then scrubbed as a backstop: `tool_result`, `context` and
+`before_provider_request`, plus pi's truncated-output snapshots (a bash result pi spills to a file and
+hands the model a path to — it reaches the endpoint one turn later, through the model's own `read`).
+
+Inbound is deliberately untouched. `message_end` and `session_compact` are not hooked: a message or a
+compaction summary the model wrote is persisted verbatim, because the guarantee is about the bytes
+that leave the machine, not about the bytes on disk. The canary suite pins both halves.
 
 *Why it is built this way* — and what each layer is actually load-bearing for — is in
 [`docs/superpowers/specs/2026-09-12-pi-secret-design.md`](docs/superpowers/specs/2026-09-12-pi-secret-design.md).
@@ -144,6 +155,12 @@ model-authored text pi persists without passing through `message_end`).
 **Defending against:** an endpoint that *records* what you send it. A reseller, a random
 OpenAI-compatible proxy, a gateway with retention, a human reading logs. The token must not be in the
 bytes that leave the machine, nor in the transcript that would reveal it on a later turn.
+
+**The boundary is the request, not the disk.** pi-secret masks what it hands the provider and does
+not touch what came back. Nothing the model authors — assistant text, tool-call arguments, a
+compaction summary — is rewritten before it is stored, so your transcript is exactly the conversation
+you had. The price is explicit: if a value ever reaches the model, its echo is your problem again, not
+pi-secret's. The outbound net still applies to that echo on the next turn, so it cannot travel.
 
 **Not defending against:** an endpoint that *actively attacks* you by steering the model to
 exfiltrate. That is not solvable at this layer, and pretending otherwise would be worse than saying
@@ -176,7 +193,7 @@ For a hostile endpoint the answer is a sandbox boundary with egress substitution
 ```sh
 npm test             # unit, component and integration tests
 npm run typecheck    # tsc --noEmit
-npm run test:canary  # end-to-end: assert secrets never reach a transcript, then sweep the filesystem
+npm run test:canary  # end-to-end: assert the outbound net, then sweep the filesystem
 ```
 
 The canary suite is the gate that matters: it drives real sessions and asserts on what actually

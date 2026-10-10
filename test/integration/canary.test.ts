@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { buildSessionContext, parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import { artifacts, makeSecureSession, readAll } from "../helpers/session.ts";
+import { artifacts, makeSecureSession, readAll, readNonModel } from "../helpers/session.ts";
 import { dropSessionVault, setActiveScopeKey, vaultForSession } from "../../src/vault.ts";
 
 const CANARY = "ghp_A1b2C3d4E5f6G7h8I9j0K1L2M3N4O5P6Q7R8";
@@ -26,12 +26,17 @@ function seedVault(sessionFile: string) {
 }
 
 describe("canary sweep", () => {
-  it("bash echoing the secret into stdout never persists it", async () => {
+  it("a literal the MODEL wrote stays in the transcript, and never comes back", async () => {
+    // The one-directional contract, pinned. pi-secret filters what goes TO the endpoint and
+    // nothing else, so text the model produced is persisted exactly as produced: there is no
+    // `message_end` rewrite and no compaction-summary amendment any more. The model can only
+    // know this canary because the script handed it to the model, which is exactly the upstream
+    // leak these assertions are about surviving.
     const cwd = mkdtempSync(join(tmpdir(), "canary-"));
     const harness = await makeSecureSession({
       cwd,
       responses: [
-        fauxAssistantMessage([fauxToolCall("bash", { command: `printf %s "${CANARY}"` })]),
+        fauxAssistantMessage([fauxToolCall("bash", { command: 'printf %s "$' + CANARY + '"' })]),
         fauxAssistantMessage("done"),
       ],
     });
@@ -40,9 +45,15 @@ describe("canary sweep", () => {
 
     await harness.session.prompt("print the token");
 
-    const text = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
-    expect(text).not.toContain(CANARY);
-    expect(text).toContain("{{sec:gh_pat}}");
+    const files = artifacts(harness.sessionDir, harness.bashTempBaseline);
+    // NOT filtered: the model's own message is on disk verbatim...
+    expect(readAll(files)).toContain(CANARY);
+    // ...but everything pi-secret still owns (user text, tool results, snapshots) is not.
+    expect(readNonModel(files)).not.toContain(CANARY);
+    // And it never re-enters a model-facing context, which is the half that matters.
+    const material = materialText(harness.session.messages);
+    expect(material).not.toContain(CANARY);
+    expect(material).toContain("{{" + "sec:gh_pat" + "}}");
   });
 
   it("an env-var echo in bash comes back masked", async () => {
@@ -112,53 +123,75 @@ describe("canary sweep", () => {
     const harness = await makeSecureSession({
       cwd,
       responses: [
-        fauxAssistantMessage([fauxToolCall("write", { path: "leak.txt", content: `token=${CANARY}` })]),
+        fauxAssistantMessage([fauxToolCall("write", { path: "leak.txt", content: `token={{sec:redacted}}` })]),
         fauxAssistantMessage("understood"),
       ],
     });
     teardown.push(() => harness.dispose());
-    setActiveScopeKey(harness.sessionFile() ?? "ephemeral");
+    // Seeded, deliberately. The refusal is `tool_call`'s job: it fires because the value is
+    // VAULTED, not because `message_end` sanitised the argument first (it no longer does).
+    // Without a vault entry the argument holds a value pi-secret has no business
+    // recognising, and the write is allowed.
+    seedVault(harness.sessionFile() ?? "ephemeral");
 
     await harness.session.prompt("write the token to a file");
     expect(existsSync(join(cwd, "leak.txt"))).toBe(false);
   });
 
   it("a truncated dump leaves no unscrubbed snapshot on disk", async () => {
-    // Forces pi's own truncation path: the result carries details.fullOutputPath
-    // pointing at the raw output, which is a real read-back channel for the model.
+    // Forces pi's own truncation path: the result carries details.fullOutputPath pointing at
+    // the raw output, which is a real read-back channel for the model. The value arrives
+    // through the ENVIRONMENT rather than the command, because a literal in the command is
+    // refused by `tool_call` (the model cannot know a vaulted value) — which would skip the
+    // truncation path entirely and make this vacuous.
     const cwd = mkdtempSync(join(tmpdir(), "canary-"));
     const harness = await makeSecureSession({
       cwd,
       responses: [
-        fauxAssistantMessage([fauxToolCall("bash", { command: `yes ${CANARY} | head -n 60000` })]),
+        fauxAssistantMessage([fauxToolCall("bash", { command: 'yes "$PROBE_TOKEN" | head -n 8000' })]),
         fauxAssistantMessage("done"),
       ],
     });
     teardown.push(() => harness.dispose());
     seedVault(harness.sessionFile() ?? "ephemeral");
+    process.env.PROBE_TOKEN = CANARY;
 
     await harness.session.prompt("flood the output");
+    delete process.env.PROBE_TOKEN;
 
-    const text = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    const files = artifacts(harness.sessionDir, harness.bashTempBaseline);
+    // Non-vacuity: pi really did spill a snapshot, so the rewrite had something to do.
+    expect(files.some((f) => f.includes("pi-bash"))).toBe(true);
+    const text = readNonModel(files);
     expect(text).not.toContain(CANARY);
+    expect(text).toContain("{{" + "sec:gh_pat" + "}}");
   });
 
   it("/export HTML carries refs, never the canary", async () => {
     // spec §13.4: the HTML exporter renders through a path we don't model, so the
     // only honest check is exporting and grepping the file. Skipping this lets a
     // renderer regression leak every stored secret to a shareable HTML file.
+    //
+    // The canary reaches the transcript through the ENVIRONMENT, not through the model's
+    // own message: text the model wrote is deliberately left verbatim, so asserting on the
+    // export would be asserting that the exporter rewrites the model — which is exactly what
+    // this extension no longer does. What must hold is that the part pi-secret DOES own,
+    // the scrubbed tool result, stays scrubbed through the export path.
     const cwd = mkdtempSync(join(tmpdir(), "canary-"));
+    writeFileSync(join(cwd, "probe.sh"), '#!/bin/sh\nprintf "TOKEN=%s\\n" "$PROBE_TOKEN"\n');
     const harness = await makeSecureSession({
       cwd,
       responses: [
-        fauxAssistantMessage([fauxToolCall("bash", { command: `printf %s "${CANARY}"` })]),
+        fauxAssistantMessage([fauxToolCall("bash", { command: "sh probe.sh" })]),
         fauxAssistantMessage("done"),
       ],
     });
     teardown.push(() => harness.dispose());
     seedVault(harness.sessionFile() ?? "ephemeral");
+    process.env.PROBE_TOKEN = CANARY;
 
-    await harness.session.prompt("print the token");
+    await harness.session.prompt("run the probe");
+    delete process.env.PROBE_TOKEN;
 
     const htmlPath = await harness.session.exportToHtml(join(cwd, "export.html"));
     const html = readFileSync(htmlPath, "utf8");
@@ -169,9 +202,9 @@ describe("canary sweep", () => {
     const b64 = /<script id="session-data"[^>]*>([^<]+)</.exec(html)?.[1] ?? "";
     expect(b64.length).toBeGreaterThan(0);
     const decoded = Buffer.from(b64, "base64").toString("utf8");
-    expect(decoded).toContain("{{sec:gh_pat}}");
+    expect(decoded).toContain("{{" + "sec:gh_pat" + "}}");
     expect(decoded).not.toContain(CANARY);
-    const corpus = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    const corpus = readNonModel(artifacts(harness.sessionDir, harness.bashTempBaseline));
     expect(corpus).not.toContain(CANARY);
   });
 
@@ -323,15 +356,19 @@ describe("the last mile — the only place the bytes themselves are observable",
     // And non-blackout: the ref really is what travels.
     expect(sent).toContain("{{sec:gh_pat}}");
 
-    // The FILE is the other half, and it is the half that was open until 2026-10-08.
-    // pi writes the summary with appendCompaction() straight to the JSONL, and it is
-    // the only model-authored text that never passes through message_end — so before
-    // the session_compact amendment below, this assertion failed with the raw value in
-    // the transcript of record, surviving every later turn, /export and /resume.
-    const corpus = readAll(artifacts(harness.sessionDir, harness.bashTempBaseline));
+    // The FILE is no longer half the contract. A compaction summary is model-authored
+    // text, and model-authored text is deliberately NOT filtered — there is no
+    // `session_compact` amendment and no `message_end` rewrite. So the summary keeps the
+    // literal the model wrote, on disk, in the transcript of record. What still holds is
+    // the direction that matters: the wire never carried it, and the non-model half of
+    // every artifact still does not.
+    const files = artifacts(harness.sessionDir, harness.bashTempBaseline);
+    expect(readAll(files)).toContain(CANARY);
+    const corpus = readNonModel(files);
     expect(corpus).not.toContain(CANARY);
-    expect(corpus).toContain("{{sec:gh_pat}}");
+    expect(corpus).toContain("{{" + "sec:gh_pat" + "}}");
   });
+
 });
 
 describe("/resume — the path that re-reads the persisted transcript", () => {

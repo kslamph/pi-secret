@@ -186,3 +186,40 @@ function safeReaddir(dir: string): string[] {
 export function readAll(files: string[]): string {
   return files.map((f) => readFileSync(f, "utf8")).join("\n");
 }
+
+/**
+ * The artifacts MINUS everything the model itself wrote.
+ *
+ * pi-secret filters what goes to the endpoint and nothing else: there is no
+ * `message_end` rewrite and no `session_compact` amendment, so an assistant message
+ * and a compaction summary are persisted exactly as produced. An assertion of
+ * "the canary is in no artifact" therefore no longer describes the contract — it
+ * describes a filter this extension deliberately does not perform.
+ *
+ * So sweep assertions read the transcript through this: assistant-authored message
+ * entries and compaction entries are dropped, everything else (user text, tool
+ * results, pi's bash snapshot files, which are read verbatim) is kept. That is the
+ * half the extension is still responsible for.
+ */
+export function readNonModel(files: string[]): string {
+  const out: string[] = [];
+  for (const file of files) {
+    const raw = readFileSync(file, "utf8");
+    if (!file.endsWith(".jsonl")) {
+      out.push(raw);
+      continue;
+    }
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      let entry: { type?: string; message?: { role?: string } };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue; // header or a partial line
+      }
+      const modelAuthored = entry.message?.role === "assistant" || entry.type === "compaction";
+      if (!modelAuthored) out.push(line);
+    }
+  }
+  return out.join("\n");
+}

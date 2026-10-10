@@ -52,9 +52,10 @@ describe("extension entry", () => {
   });
 
   it("registers every hook the design depends on, at factory time", () => {
-    // session_compact is in this list because a compaction summary is the only
-    // model-authored text pi persists WITHOUT passing it through message_end — see
-    // src/index.ts. A refactor that dropped it would put summaries back on disk raw.
+    // message_end and session_compact are NOT in this list, and their absence is the
+    // contract rather than a gap: nothing the model produced is filtered, so there is
+    // nothing to scrub on the inbound side. A refactor that re-added either would be
+    // rewriting the user's transcript again — see src/index.ts.
     //
     // turn_end is here for a different reason: it is where pi-secret measures whether the
     // provider-level payload hook exists at all, and drops that measurement if removed.
@@ -65,9 +66,7 @@ describe("extension entry", () => {
         "before_provider_request",
         "context",
         "input",
-        "message_end",
         "session_shutdown",
-        "session_compact",
         "session_start",
         "tool_call",
         "tool_result",
